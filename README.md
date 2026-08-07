@@ -16,6 +16,12 @@ package.
 > PowerToys release. Mouse Without Borders and PowerToys are Microsoft product
 > names and are referenced only to describe compatibility.
 
+**[Download the latest release](https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux/releases/latest)**
+
+## Screenshot
+
+![Mouse Without Borders for Linux connected to Windows PCs](docs/screenshot.png)
+
 ## Install
 
 Download the latest `.deb` from the
