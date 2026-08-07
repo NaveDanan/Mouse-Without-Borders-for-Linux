@@ -28,14 +28,22 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.1" date="2026-08-07">
+      <description>
+        <p>
+          Add an Ubuntu top-bar indicator with Open, Settings, and Exit
+          actions. Closing the settings window now keeps Mouse Without Borders
+          running in the background until Exit is selected from the indicator.
+        </p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-08-07">
       <description>
         <p>
           Add the four-computer matrix, concurrent multi-PC connections,
           directed input routing, multi-edge portal capture, four machine
           shortcuts, full bottom-edge pointer reach, and background-launch
-          isolation for clipboard helpers, plus an Ubuntu top-bar indicator
-          with close-to-background, Open, Settings, and Exit actions.
+          isolation for clipboard helpers.
         </p>
       </description>
     </release>

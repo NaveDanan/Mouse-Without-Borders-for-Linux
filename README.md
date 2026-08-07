@@ -29,7 +29,7 @@ Download the latest `.deb` from the
 page, then run:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.3.0_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.3.1_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -55,7 +55,7 @@ cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- 
 The package is written to `dist/`. Install a local build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.3.0_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.3.1_amd64.deb
 powertoys-mouse-without-borders
 ```
 
