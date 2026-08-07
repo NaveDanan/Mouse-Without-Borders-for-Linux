@@ -29,7 +29,7 @@ Download the latest `.deb` from the
 page, then run:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.4.0_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.5.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -55,7 +55,7 @@ cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- 
 The package is written to `dist/`. Install a local build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.4.0_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.5.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -64,18 +64,21 @@ computer's name and its 16-character security key. GNOME then displays its
 normal Input Capture and Remote Desktop permission dialogs. The compositor must
 receive the first approval from the signed-in user; an application cannot grant
 itself global input access. The background service retains that approved portal
-session across Connect, Disconnect, Reconnect, and compatible settings changes,
-so desktops with the InputCapture v1 portal do not ask on every PC connection.
-A new login, service restart, or monitor-edge change may require approval again.
-The service never reads `/dev/input`, writes `/dev/uinput`, or runs as root.
+session across UI exits and launches, Connect, Disconnect, Reconnect, suspend,
+and compatible settings changes. InputCapture v2 desktops also persist the
+compositor's restore token. Ubuntu 24.04 exposes InputCapture v1, so an explicit
+`quit`, logout, permission revocation, or monitor-edge change can still require
+approval; ordinary application launches do not. The service never reads
+`/dev/input`, writes `/dev/uinput`, or runs as root.
 
-While the application is running, its Mouse Without Borders indicator remains
-visible in Ubuntu's top bar. Closing the settings window with its **x** or
-**Close** button hides the window without stopping sharing. Right-click the
-indicator to open its **Open**, **Settings**, and **Exit** menu; only **Exit**
-stops the background service and terminates the application. The indicator
-uses Ubuntu's built-in StatusNotifierItem/AppIndicator integration and does not
-load GTK 3 into the GTK 4 application.
+While the UI is running, its Mouse Without Borders indicator remains visible in
+Ubuntu's top bar. Closing the settings window with its **x** or **Close** button
+hides the window without stopping sharing. **Exit UI (keep sharing)** closes the
+settings/indicator process but deliberately retains the approved background
+portal session. Use Disconnect to pause connections while retaining permission,
+or the `quit` command when the daemon itself must be stopped. The indicator uses
+Ubuntu's built-in StatusNotifierItem/AppIndicator integration and does not load
+GTK 3 into the GTK 4 application.
 
 On each launch, the application checks the latest stable GitHub release in the
 background. Being up to date and temporary network failures are silent. The
@@ -103,12 +106,22 @@ Mouse` connects the two ends of a row.
 Double-clicking a Windows tile takes over that computer and double-clicking the
 local tile comes back. The service creates all required outer-edge portal
 barriers in one approved capture session and routes each edge to the adjacent
-computer. Physical Linux monitors are detected separately to ensure barriers
-are placed only on the desktop's exterior boundary. Visible Connect and
-Disconnect buttons control the background service, while right-clicking the
-matrix also offers Connect, Disconnect, and Reconnect. Options with no Linux
-equivalent yet (for example Disable CAD) are stored so the form round-trips,
-and take effect as the matching feature lands.
+computer. Input routing is bidirectional: a mouse and keyboard physically
+attached to Windows can enter Linux and use the same matrix edges to return to
+Windows or continue to another connected PC. Physical Linux monitors are
+detected separately to ensure barriers are placed only on the desktop's
+exterior boundary. Visible Connect and Disconnect buttons control the
+background service, while right-clicking the matrix also offers Connect,
+Disconnect, and Reconnect. Options with no Linux equivalent yet (for example
+Disable CAD) are stored so the form round-trips, and take effect as the matching
+feature lands.
+
+After a peer connects, the service remembers its LAN adapter address. Switching
+to an offline peer sends Wake-on-LAN and completes the switch after reconnection;
+switching to a connected locked peer sends the native Mouse Without Borders
+awake packet before input. Wake-on-LAN must be enabled in the sleeping PC's
+firmware, network-adapter settings, and operating system, and both machines must
+be reachable on the same broadcast LAN.
 
 Base TCP port and encryption compatibility live at the bottom of the IP
 Mappings tab; the mapping table itself resolves a machine name to an address

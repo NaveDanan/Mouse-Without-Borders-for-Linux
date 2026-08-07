@@ -28,6 +28,16 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.0" date="2026-08-07">
+      <description>
+        <p>
+          Recover connections automatically after suspend, retain approved
+          input capture across UI relaunches, add Wake-on-LAN and lock-screen
+          wake packets, and complete bidirectional Windows-hosted input and
+          edge routing.
+        </p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-08-07">
       <description>
         <p>

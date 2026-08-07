@@ -114,7 +114,7 @@ MENU_XML = f"""
 MENU_ITEMS = {
     1: "Open",
     2: "Settings",
-    3: "Exit",
+    3: "Exit UI (keep sharing)",
 }
 
 
@@ -147,7 +147,7 @@ def _menu_item(item_id: int) -> GLib.Variant:
 
 
 def menu_layout() -> GLib.Variant:
-    """Build the complete immutable Open/Settings/Exit DBusMenu layout."""
+    """Build the complete immutable top-bar DBusMenu layout."""
 
     root = GLib.Variant(
         "(ia{sv}av)",

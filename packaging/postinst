@@ -29,6 +29,16 @@ loginctl list-users --no-legend 2>/dev/null | while read -r uid user _rest; do
 
     was_active=false
     was_enabled=false
+    if user_systemctl is-active --quiet "$APP_UNIT"; then
+        was_active=true
+        # The Python daemon keeps imported modules in memory. Stop it before
+        # daemon-reload so an in-place package update cannot keep running the
+        # previous release until the next login.
+        user_systemctl stop "$APP_UNIT" >/dev/null 2>&1 || true
+    fi
+    if user_systemctl is-enabled --quiet "$APP_UNIT"; then
+        was_enabled=true
+    fi
     for previous_unit in "$LEGACY_UNIT" "$POWERTOYS_UNIT"; do
         if user_systemctl is-active --quiet "$previous_unit"; then
             was_active=true

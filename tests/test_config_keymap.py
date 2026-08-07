@@ -13,6 +13,34 @@ from mwb_linux.keymap import evdev_to_windows, windows_to_evdev
 
 
 class ConfigAndKeymapTests(unittest.TestCase):
+    def test_learned_wake_on_lan_mac_round_trips_with_remote_target(self):
+        config = Config(
+            machine_name="linux",
+            machine_id=10,
+            remote_machines=[
+                {
+                    "name": "windows",
+                    "address": "192.168.1.20",
+                    "mac": "AA:BB:CC:DD:EE:FF",
+                }
+            ],
+            machine_matrix=["linux", "windows", "", ""],
+        )
+
+        self.assertEqual(config.remote_machines[0]["mac"], "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(config.resolve_hosts()[0].mac, "aa:bb:cc:dd:ee:ff")
+
+    def test_invalid_wake_on_lan_mac_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Wake-on-LAN"):
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                remote_machines=[
+                    {"name": "windows", "address": "windows", "mac": "not-a-mac"}
+                ],
+                machine_matrix=["linux", "windows", "", ""],
+            ).validate()
+
     def test_config_is_mode_0600_and_redacted_publicly(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"

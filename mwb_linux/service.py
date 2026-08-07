@@ -68,6 +68,7 @@ class MouseWithoutBordersService:
         self._control_thread: threading.Thread | None = None
         self._status_lock = threading.Lock()
         self._features_lock = threading.Lock()
+        self._config_lock = threading.Lock()
         # Runtime intent is separate from the startup preference. Once the
         # user presses Connect, applying settings must keep the session alive;
         # once they press Disconnect, Windows reverse channels must stay off.
@@ -135,7 +136,10 @@ class MouseWithoutBordersService:
             return
         if self.connection is None:
             self.connection = ConnectionManager(
-                self.config, self._process_packet, self._connection_status
+                self.config,
+                self._process_packet,
+                self._connection_status,
+                self._persist_peer_mac,
             )
         if self.clipboard is None and self.config.share_clipboard:
             self.clipboard = ClipboardManager(
@@ -149,7 +153,13 @@ class MouseWithoutBordersService:
                 if self.connection
                 else None,
                 self._input_status,
-                lambda: self.config.save(self.config_path),
+                self._persist_config,
+                lambda machine_id: self.connection.peer_name(machine_id)
+                if self.connection
+                else None,
+                lambda name: self.connection.wake_peer(name)
+                if self.connection
+                else False,
             )
         else:
             self.input.config = self.config
@@ -271,9 +281,11 @@ class MouseWithoutBordersService:
             # Never leave the compositor capture active after the selected PC
             # loses its final channel. Other peers may still be connected, so
             # the manager's overall state alone cannot make this decision.
-            self.input.release_local()
+            self.input.recover_active_peer()
         if state == "connected":
             self._start_features()
+            if self.input:
+                self.input.retry_pending_switch()
         elif self.connection and self.connection.connected:
             state = "connected"
             message = f"{len(self.connection.peers)} connected; {message}"
@@ -290,6 +302,25 @@ class MouseWithoutBordersService:
             self._status["message"] = message
             self._status["updated"] = time.time()
         LOGGER.info("state=%s: %s", state, message)
+
+    def _persist_config(self) -> None:
+        """Serialize portal tokens and learned network metadata without races."""
+
+        with self._config_lock:
+            self.config.save(self.config_path)
+
+    def _persist_peer_mac(self, machine_name: str, mac: str) -> None:
+        changed = False
+        with self._config_lock:
+            for remote in self.config.remote_machines:
+                if remote["name"].casefold() != machine_name.casefold():
+                    continue
+                if remote.get("mac") != mac:
+                    remote["mac"] = mac
+                    changed = True
+                break
+            if changed:
+                self.config.save(self.config_path)
 
     def status(self) -> dict[str, object]:
         with self._status_lock:
@@ -342,7 +373,15 @@ class MouseWithoutBordersService:
             ID_ALL,
         ):
             if self.input:
-                self.input.inject_mouse(*packet.mouse)
+                self.input.inject_mouse(*packet.mouse, source_id=packet.src)
+            return
+        if packet.type == PackageType.NEXT_MACHINE and packet.dest in (
+            self.config.machine_id,
+            ID_ALL,
+        ):
+            if self.input:
+                x, y, next_machine_id, _flags = packet.mouse
+                self.input.follow_next_machine(next_machine_id, x, y, packet.src)
             return
         if packet.type in (PackageType.CLIPBOARD_TEXT, PackageType.CLIPBOARD_IMAGE):
             if self.clipboard and packet.complete_clipboard is not None:
@@ -351,14 +390,14 @@ class MouseWithoutBordersService:
                     image=packet.type == PackageType.CLIPBOARD_IMAGE,
                 )
             return
-        if packet.type == PackageType.HIDE_MOUSE and self.input:
-            active_id = (
-                self.connection.peer_id(self.input.active_remote_name)
-                if self.connection
-                else None
-            )
-            if not self.input.remote_active or packet.src in (active_id, 0, ID_ALL):
-                self.input.release_local()
+        if packet.type == PackageType.HIDE_MOUSE:
+            # This packet is sent to the previously *controlled* computer when
+            # a controller follows NEXT_MACHINE. It is not a request to release
+            # Linux's physical InputCapture session; doing so broke the reverse
+            # (Windows-hosted) direction by confusing the two roles.
+            if self.input:
+                self.input.controlled_pointer_hidden(packet.src)
+            return
 
     def reconnect(self) -> None:
         self._connection_requested = True
@@ -392,6 +431,27 @@ class MouseWithoutBordersService:
             LOGGER.warning("could not update desktop shortcuts: %s", exc)
 
     def update_config(self, values: dict[str, object]) -> None:
+        values = dict(values)
+        # Wake-on-LAN addresses are learned by the live network runtime and are
+        # deliberately absent from the settings form. Preserve them when the
+        # form replaces its name/address records.
+        if isinstance(values.get("remote_machines"), list):
+            known_macs = {
+                remote["name"].casefold(): remote.get("mac", "")
+                for remote in self.config.remote_machines
+                if remote.get("mac")
+            }
+            merged_remotes = []
+            for raw_remote in values["remote_machines"]:
+                if not isinstance(raw_remote, dict):
+                    merged_remotes.append(raw_remote)
+                    continue
+                remote = dict(raw_remote)
+                name = str(remote.get("name", "")).casefold()
+                if name in known_macs:
+                    remote["mac"] = known_macs[name]
+                merged_remotes.append(remote)
+            values["remote_machines"] = merged_remotes
         allowed = {field.name for field in fields(Config)}
         candidate_values = asdict(self.config)
         for key, value in values.items():
@@ -404,7 +464,8 @@ class MouseWithoutBordersService:
         }
         candidate.hotkeys = {**HOTKEY_DEFAULTS, **candidate.hotkeys}
         candidate.validate()
-        candidate.save(self.config_path)
+        with self._config_lock:
+            candidate.save(self.config_path)
         # Saving from the UI is also the repair path when desktop settings were
         # reset outside the application, so reapply the desired bindings even
         # when their values did not change.

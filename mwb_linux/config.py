@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import string
@@ -13,6 +14,7 @@ from pathlib import Path
 
 SECRET_LENGTH = 16
 MAX_MACHINES = 4
+MAC_ADDRESS_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 
 HOST_POSITIONS = ("left", "right", "top", "bottom")
 CRYPTO_PROFILES = (
@@ -132,6 +134,7 @@ class HostTarget:
 
     name: str
     address: str
+    mac: str = ""
 
 
 @dataclass(slots=True)
@@ -189,8 +192,12 @@ class Config:
                 continue
             address = str(raw.get("address", raw.get("host", ""))).strip()
             name = str(raw.get("name", "")).strip() or address
+            mac = str(raw.get("mac", "")).strip().lower()
             if name:
-                remotes.append({"name": name, "address": address or name})
+                remote = {"name": name, "address": address or name}
+                if mac:
+                    remote["mac"] = mac
+                remotes.append(remote)
         if not remotes:
             address = self.host.strip()
             name = self.host_name.strip() or address
@@ -266,8 +273,11 @@ class Config:
         for remote in self.remote_machines:
             name = remote.get("name", "").strip()
             address = remote.get("address", "").strip()
+            mac = remote.get("mac", "").strip()
             if not name or not address:
                 raise ValueError("each remote computer requires a name and address")
+            if mac and not MAC_ADDRESS_PATTERN.fullmatch(mac):
+                raise ValueError(f"invalid Wake-on-LAN MAC address for {name}")
             try:
                 name.encode("ascii")
             except UnicodeEncodeError as exc:
@@ -303,7 +313,7 @@ class Config:
 
         mappings = parse_ip_mappings(self.ip_mappings)
         configured = {
-            remote["name"].casefold(): remote["address"]
+            remote["name"].casefold(): remote
             for remote in self.remote_machines
         }
         targets: list[HostTarget] = []
@@ -313,8 +323,11 @@ class Config:
             key = name.casefold()
             if not name or key == self.machine_name.casefold() or key in seen:
                 continue
-            address = mappings.get(key) or configured.get(key) or name
-            targets.append(HostTarget(name=name, address=address))
+            remote = configured.get(key, {})
+            address = mappings.get(key) or remote.get("address") or name
+            targets.append(
+                HostTarget(name=name, address=address, mac=remote.get("mac", ""))
+            )
             seen.add(key)
         return targets
 

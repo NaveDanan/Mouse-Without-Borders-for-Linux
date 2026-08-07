@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import Config
 from .keymap import evdev_to_windows, windows_to_evdev
-from .protocol import Packet, PackageType
+from .protocol import ID_ALL, ID_NONE, Packet, PackageType
 from .topology import direction_to, neighbour
 
 LOGGER = logging.getLogger(__name__)
@@ -31,6 +31,8 @@ WM_MOUSEWHEEL = 0x20A
 WM_XBUTTONDOWN = 0x20B
 WM_XBUTTONUP = 0x20C
 WM_MOUSEHWHEEL = 0x20E
+CONTROLLED_EDGE_THRESHOLD = 128
+EDGE_ENTRY_OFFSET = 800
 
 BUTTON_TO_WM = {
     (272, True): WM_LBUTTONDOWN,
@@ -138,6 +140,7 @@ class PortalBridge:
         self.event_callback = event_callback
         self.process: subprocess.Popen[str] | None = None
         self._write_lock = threading.Lock()
+        self._stopping = False
 
     def start(
         self,
@@ -152,6 +155,7 @@ class PortalBridge:
         executable = find_bridge()
         if not executable:
             raise FileNotFoundError("mwb-portal-bridge is not built or installed")
+        self._stopping = False
         self.process = subprocess.Popen(
             [executable],
             stdin=subprocess.PIPE,
@@ -187,6 +191,8 @@ class PortalBridge:
                 self.event_callback(json.loads(line))
             except (json.JSONDecodeError, TypeError) as exc:
                 LOGGER.warning("invalid portal bridge response: %s", exc)
+        if not self._stopping:
+            self.event_callback({"type": "event", "event": "bridge_stopped"})
 
     def _stderr_loop(self) -> None:
         assert self.process and self.process.stderr
@@ -204,6 +210,7 @@ class PortalBridge:
     def stop(self) -> None:
         if not self.process:
             return
+        self._stopping = True
         try:
             self.command("shutdown")
             self.process.wait(timeout=3)
@@ -216,6 +223,7 @@ class PortalBridge:
                     self.process.kill()
                     self.process.wait(timeout=3)
         self.process = None
+        self._stopping = False
 
 
 class InputManager:
@@ -228,6 +236,8 @@ class InputManager:
         peer_id: Callable[..., int | None],
         status_callback: Callable[[str], None],
         persist_config: Callable[[], None] | None = None,
+        peer_name: Callable[[int], str | None] | None = None,
+        wake_peer: Callable[[str], bool] | None = None,
         bridge: PortalBridge | None = None,
     ) -> None:
         self.config = config
@@ -235,6 +245,8 @@ class InputManager:
         self._peer_lookup = peer_id
         self.status_callback = status_callback
         self.persist_config = persist_config or (lambda: None)
+        self._peer_name_lookup = peer_name or (lambda _machine_id: None)
+        self._wake_peer = wake_peer or (lambda _machine_name: False)
         self.bridge = bridge or PortalBridge(self._bridge_event)
         self.remote_active = False
         self.width = 1920
@@ -248,7 +260,14 @@ class InputManager:
         self.inject_regions: list[tuple[int, int, int, int]] = []
         self._keys_down: set[int] = set()
         self._started = False
+        self._desired = False
+        self._capture_ready = False
+        self._restart_lock = threading.Lock()
+        self._restart_scheduled = False
         self._pending_remote_name = ""
+        self._waking_remote_name = ""
+        self._controlled_edge = ""
+        self._controlled_source_id = ID_NONE
         adjacent = neighbour(
             self.config.machine_matrix,
             self.config.two_row,
@@ -269,9 +288,11 @@ class InputManager:
             return self._peer_lookup()
 
     def start(self) -> None:
+        self._desired = True
         if self._started:
             return
         try:
+            self._capture_ready = not self.config.edge_switching
             self.bridge.start(
                 self.config.host_position,
                 self.config.capture_restore_token,
@@ -288,9 +309,11 @@ class InputManager:
             LOGGER.warning("input portal unavailable: %s", exc)
 
     def stop(self) -> None:
+        self._desired = False
         self.release_local()
         self.bridge.stop()
         self._started = False
+        self._capture_ready = False
 
     def switch_remote(self, machine_name: str | None = None) -> None:
         if machine_name:
@@ -299,8 +322,15 @@ class InputManager:
                 self.release_local()
                 return
             if not self._peer_id(machine_name):
-                self.status_callback(f"Cannot switch: {machine_name} is not connected")
+                self.active_remote_name = machine_name
+                self._waking_remote_name = machine_name
+                if self._wake_peer(machine_name):
+                    self.status_callback(f"Waking {machine_name}; waiting for connection")
+                else:
+                    self.status_callback(f"Cannot switch: {machine_name} is not connected")
                 return
+            self._waking_remote_name = ""
+            self._wake_peer(machine_name)
             if self.remote_active:
                 if machine_name.casefold() == self.active_remote_name.casefold():
                     self.status_callback(f"Already controlling {machine_name}")
@@ -321,10 +351,32 @@ class InputManager:
         if not self.config.edge_switching:
             self.status_callback("Enable screen-edge switching first")
             return
+        if not self._capture_ready:
+            self._waking_remote_name = self.active_remote_name
+            self.status_callback("Waiting for input capture permission")
+            return
         if not self.remote_active and self._trigger_edge():
             self.status_callback("Activating host input capture")
             return
         self.status_callback("Move the pointer through the configured screen edge")
+
+    def retry_pending_switch(self) -> None:
+        """Complete a requested switch after Wake-on-LAN reconnects the peer."""
+
+        machine_name = self._waking_remote_name
+        if machine_name and self._capture_ready and self._peer_id(machine_name):
+            self._waking_remote_name = ""
+            self.switch_remote(machine_name)
+
+    def recover_active_peer(self) -> None:
+        """Release a lost target, wake it, and resume control after reconnect."""
+
+        machine_name = self.active_remote_name
+        self.release_local()
+        if machine_name:
+            self._waking_remote_name = machine_name
+            self._wake_peer(machine_name)
+            self.status_callback(f"Reconnecting to {machine_name}")
 
     def _activate_remote(self, machine_name: str = "", edge: str = "") -> None:
         if self.remote_active:
@@ -342,8 +394,15 @@ class InputManager:
                 self.bridge.command("capture_release")
             except ConnectionError:
                 pass
-            self.status_callback("Cannot switch: no connected host")
+            self._waking_remote_name = self.active_remote_name
+            if self.active_remote_name and self._wake_peer(self.active_remote_name):
+                self.status_callback(
+                    f"Waking {self.active_remote_name}; waiting for connection"
+                )
+            else:
+                self.status_callback("Cannot switch: no connected host")
             return
+        self._waking_remote_name = ""
         self.remote_active = True
         edge = edge or direction_to(
             self.config.machine_matrix,
@@ -441,7 +500,7 @@ class InputManager:
                 queue.append((candidate, first_hop))
         return ""
 
-    def release_local(self) -> None:
+    def release_local(self, cursor_position: tuple[int, int] | None = None) -> None:
         self._pending_remote_name = ""
         if not self.remote_active:
             return
@@ -450,7 +509,17 @@ class InputManager:
             self._send_key(code, False)
         self._keys_down.clear()
         try:
-            self.bridge.command("capture_release")
+            arguments = {}
+            if cursor_position is not None:
+                arguments["cursor_position"] = [
+                    _mwb_to_eis_coordinate(
+                        cursor_position[0], self.inject_x, self.inject_width
+                    ),
+                    _mwb_to_eis_coordinate(
+                        cursor_position[1], self.inject_y, self.inject_height
+                    ),
+                ]
+            self.bridge.command("capture_release", **arguments)
         except ConnectionError:
             pass
         self.status_callback("Controlling this computer")
@@ -475,6 +544,8 @@ class InputManager:
                     self.width = max(1, right - left)
                     self.height = max(1, bottom - top)
                 self.status_callback("Screen-edge capture ready")
+                self._capture_ready = True
+                self.retry_pending_switch()
             elif event.get("id") == "inject":
                 token = event.get("result", {}).get("restore_token")
                 if token:
@@ -531,8 +602,38 @@ class InputManager:
                 self.inject_y = float(top)
                 self.inject_width = float(right - left)
                 self.inject_height = float(bottom - top)
-        elif event_type and event_type.endswith("_error"):
+        elif event_type and (
+            event_type.endswith("_error") or event_type == "bridge_stopped"
+        ):
             self.status_callback(f"Input portal error: {event.get('error', 'unknown')}")
+            self._schedule_bridge_restart()
+
+    def _schedule_bridge_restart(self) -> None:
+        """Recreate portal sessions if the compositor drops them after resume."""
+
+        if not self._desired:
+            return
+        with self._restart_lock:
+            if self._restart_scheduled:
+                return
+            self._restart_scheduled = True
+
+        def restart() -> None:
+            try:
+                time.sleep(1)
+                if not self._desired:
+                    return
+                self.bridge.stop()
+                self._started = False
+                self._capture_ready = False
+                self.start()
+            finally:
+                with self._restart_lock:
+                    self._restart_scheduled = False
+
+        threading.Thread(
+            target=restart, name="mwb-portal-restart", daemon=True
+        ).start()
 
     def _send_key(self, code: int, pressed: bool) -> None:
         mapped = evdev_to_windows(code, pressed)
@@ -591,7 +692,13 @@ class InputManager:
         self.y = max(0, min(65535, self.y))
         self._send_mouse(WM_MOUSEMOVE, 0)
 
-    def _switch_active_target(self, machine_name: str, *, edge: str = "") -> None:
+    def _switch_active_target(
+        self,
+        machine_name: str,
+        *,
+        edge: str = "",
+        position: tuple[int, int] | None = None,
+    ) -> None:
         previous_id = self._peer_id(self.active_remote_name)
         if previous_id:
             hide = Packet()
@@ -599,14 +706,16 @@ class InputManager:
             hide.dest = previous_id
             self.send_packet(hide)
         self.active_remote_name = machine_name
-        if edge == "right":
-            self.x = 800
+        if position is not None:
+            self.x, self.y = position
+        elif edge == "right":
+            self.x = EDGE_ENTRY_OFFSET
         elif edge == "left":
-            self.x = 65535 - 800
+            self.x = 65535 - EDGE_ENTRY_OFFSET
         elif edge == "bottom":
-            self.y = 800
+            self.y = EDGE_ENTRY_OFFSET
         elif edge == "top":
-            self.y = 65535 - 800
+            self.y = 65535 - EDGE_ENTRY_OFFSET
         else:
             self.x = self.y = 32768
         self._send_mouse(WM_MOUSEMOVE, 0)
@@ -649,7 +758,15 @@ class InputManager:
         except ConnectionError as exc:
             LOGGER.warning("keyboard injection unavailable: %s", exc)
 
-    def inject_mouse(self, x: int, y: int, wheel: int, event: int) -> None:
+    def inject_mouse(
+        self,
+        x: int,
+        y: int,
+        wheel: int,
+        event: int,
+        *,
+        source_id: int = ID_NONE,
+    ) -> None:
         try:
             if event == WM_MOUSEMOVE:
                 self.bridge.command(
@@ -657,6 +774,7 @@ class InputManager:
                     x=_mwb_to_eis_coordinate(x, self.inject_x, self.inject_width),
                     y=_mwb_to_eis_coordinate(y, self.inject_y, self.inject_height),
                 )
+                self._route_controlled_edge(x, y, source_id)
             elif event in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
                 self.bridge.command(
                     "inject_scroll",
@@ -678,3 +796,91 @@ class InputManager:
                     )
         except ConnectionError as exc:
             LOGGER.warning("pointer injection unavailable: %s", exc)
+
+    def _route_controlled_edge(self, x: int, y: int, source_id: int) -> None:
+        """Tell a Windows controller when its pointer leaves the Linux tile."""
+
+        if (
+            source_id in (ID_NONE, ID_ALL)
+            or self.remote_active
+            or not self.config.edge_switching
+            or not self._peer_name_lookup(source_id)
+        ):
+            return
+        edge = ""
+        if x <= CONTROLLED_EDGE_THRESHOLD:
+            edge = "left"
+        elif x >= 65535 - CONTROLLED_EDGE_THRESHOLD:
+            edge = "right"
+        elif y <= CONTROLLED_EDGE_THRESHOLD:
+            edge = "top"
+        elif y >= 65535 - CONTROLLED_EDGE_THRESHOLD:
+            edge = "bottom"
+        # Windows places the pointer only two pixels inside a newly controlled
+        # computer. That first coordinate is itself inside the edge threshold;
+        # arm the edge and require an interior movement before treating a later
+        # visit as an exit, otherwise control bounces straight back to Windows.
+        if self._controlled_source_id != source_id:
+            self._controlled_source_id = source_id
+            self._controlled_edge = edge
+            return
+        if not edge:
+            self._controlled_edge = ""
+            return
+        if self._controlled_edge == edge and self._controlled_source_id == source_id:
+            return
+
+        destination = neighbour(
+            self.config.machine_matrix,
+            self.config.two_row,
+            self.config.machine_name,
+            edge,
+            wrap=bool(self.config.other_options.get("wrap_mouse")),
+        )
+        destination_id = self._peer_id(destination) if destination else None
+        if not destination_id:
+            if destination:
+                self._wake_peer(destination)
+            return
+
+        entry_x, entry_y = x, y
+        if edge == "right":
+            entry_x = EDGE_ENTRY_OFFSET
+        elif edge == "left":
+            entry_x = 65535 - EDGE_ENTRY_OFFSET
+        elif edge == "bottom":
+            entry_y = EDGE_ENTRY_OFFSET
+        else:
+            entry_y = 65535 - EDGE_ENTRY_OFFSET
+        packet = Packet()
+        packet.type = PackageType.NEXT_MACHINE
+        packet.dest = source_id
+        packet.mouse = (entry_x, entry_y, destination_id, 0)
+        self.send_packet(packet)
+        self._controlled_edge = edge
+        self._controlled_source_id = source_id
+        self.status_callback(f"Controller switched to {destination}")
+
+    def controlled_pointer_hidden(self, source_id: int) -> None:
+        """Reset reverse-routing state when the controller leaves Linux."""
+
+        if source_id in (ID_NONE, ID_ALL, self._controlled_source_id):
+            self._controlled_edge = ""
+            self._controlled_source_id = ID_NONE
+
+    def follow_next_machine(
+        self, machine_id: int, x: int, y: int, source_id: int
+    ) -> None:
+        """Honor edge routing reported by a Windows controlled machine."""
+
+        if not self.remote_active:
+            return
+        active_id = self._peer_id(self.active_remote_name)
+        if source_id not in (active_id, ID_NONE, ID_ALL):
+            return
+        if machine_id == self.config.machine_id:
+            self.release_local((x, y))
+            return
+        machine_name = self._peer_name_lookup(machine_id)
+        if machine_name and self._peer_id(machine_name):
+            self._switch_active_target(machine_name, position=(x, y))

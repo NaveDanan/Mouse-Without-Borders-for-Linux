@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import socket
 import threading
@@ -11,6 +12,7 @@ import time
 from ipaddress import ip_address
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import Config, HostTarget
 from .crypto import CryptoProfile, EncryptedSocket
@@ -27,6 +29,82 @@ from .protocol import (
 )
 
 LOGGER = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL = 15.0
+RESUME_OFFSET_THRESHOLD = 1.0
+TCP_KEEPIDLE_SECONDS = 15
+TCP_KEEPINTVL_SECONDS = 5
+TCP_KEEPCNT = 3
+TCP_USER_TIMEOUT_MS = 20_000
+MAC_ADDRESS_PATTERN = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+
+def _suspend_offset() -> float:
+    """Return time spent suspended since boot on Linux."""
+
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return 0.0
+    return time.clock_gettime(clock) - time.monotonic()
+
+
+def configure_tcp_liveness(sock: socket.socket) -> None:
+    """Make a dead post-suspend TCP path fail in seconds instead of hours."""
+
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    options = (
+        ("TCP_KEEPIDLE", TCP_KEEPIDLE_SECONDS),
+        ("TCP_KEEPINTVL", TCP_KEEPINTVL_SECONDS),
+        ("TCP_KEEPCNT", TCP_KEEPCNT),
+        ("TCP_USER_TIMEOUT", TCP_USER_TIMEOUT_MS),
+    )
+    for option_name, value in options:
+        option = getattr(socket, option_name, None)
+        if option is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError:
+            # Kernels differ in which optional TCP settings they expose. The
+            # portable SO_KEEPALIVE setting above still provides a fallback.
+            LOGGER.debug("TCP liveness option %s is unavailable", option_name)
+
+
+def neighbor_mac(address: str, arp_path: Path = Path("/proc/net/arp")) -> str:
+    """Return a same-LAN peer's MAC from the kernel neighbour cache."""
+
+    wanted = address.split("%", 1)[0]
+    try:
+        lines = arp_path.read_text(encoding="ascii", errors="replace").splitlines()[1:]
+    except OSError:
+        return ""
+    for line in lines:
+        columns = line.split()
+        if len(columns) < 4 or columns[0] != wanted:
+            continue
+        mac = columns[3].lower()
+        if mac != "00:00:00:00:00:00" and MAC_ADDRESS_PATTERN.fullmatch(mac):
+            return mac
+    return ""
+
+
+def wake_on_lan(mac: str, addresses: tuple[str, ...] = ()) -> bool:
+    """Send a Wake-on-LAN magic packet by broadcast and resolved unicast."""
+
+    normalized = mac.strip().lower().replace("-", ":")
+    if not MAC_ADDRESS_PATTERN.fullmatch(normalized):
+        return False
+    payload = b"\xff" * 6 + bytes.fromhex(normalized.replace(":", "")) * 16
+    destinations = {"255.255.255.255", *addresses}
+    sent = False
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as wake_socket:
+        wake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for destination in destinations:
+            try:
+                wake_socket.sendto(payload, (destination, 9))
+                sent = True
+            except OSError:
+                continue
+    return sent
 
 
 class AuthenticationError(ConnectionError):
@@ -257,10 +335,12 @@ class ConnectionManager:
         config: Config,
         packet_callback: Callable[[PeerConnection, Packet], None],
         status_callback: Callable[[str, str], None],
+        persist_peer_mac: Callable[[str, str], None] | None = None,
     ) -> None:
         self.config = config
         self.packet_callback = packet_callback
         self.status_callback = status_callback
+        self.persist_peer_mac = persist_peer_mac or (lambda _name, _mac: None)
         self._connections: list[PeerConnection] = []
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -276,6 +356,7 @@ class ConnectionManager:
         self._connecting_targets: set[str] = set()
         self._target_threads: set[threading.Thread] = set()
         self._authentication_threads: set[threading.Thread] = set()
+        self._suspend_offset = _suspend_offset()
         # Windows assigns IDs once per sending process, then reuses that ID on
         # every redundant socket. Start away from zero so a daemon restart is
         # also unlikely to collide with the Windows receiver's recent-ID queue.
@@ -365,6 +446,12 @@ class ConnectionManager:
         peer = self.peer
         return peer.machine_id if peer else None
 
+    def peer_name(self, machine_id: int) -> str | None:
+        for peer in self.peers:
+            if peer.machine_id == machine_id:
+                return peer.name
+        return None
+
     def start(self) -> None:
         if self._worker and self._worker.is_alive():
             if self._authentication_failed:
@@ -397,6 +484,10 @@ class ConnectionManager:
         self._start_listener()
         last_heartbeat = 0.0
         while not self._stop.is_set():
+            suspend_offset = _suspend_offset()
+            if suspend_offset - self._suspend_offset >= RESUME_OFFSET_THRESHOLD:
+                self._suspend_offset = suspend_offset
+                self.resume_after_suspend()
             if self._reconnect.is_set():
                 self._reconnect.clear()
                 self._authentication_failed.clear()
@@ -415,7 +506,7 @@ class ConnectionManager:
                 if now < self._retry_after.get(key, 0):
                     continue
                 self._start_target_connection(target)
-            if self.connected and time.monotonic() - last_heartbeat >= 30:
+            if self.connected and time.monotonic() - last_heartbeat >= HEARTBEAT_INTERVAL:
                 self.broadcast_heartbeat()
                 last_heartbeat = time.monotonic()
             self._stop.wait(0.5)
@@ -492,6 +583,7 @@ class ConnectionManager:
                     raw_socket.close()
                     return False
                 raw_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                configure_tcp_liveness(raw_socket)
                 connection = PeerConnection(
                     raw_socket,
                     self.config,
@@ -510,6 +602,7 @@ class ConnectionManager:
                         f"{target.name} identified itself as {connection.info.name}"
                     )
                 self._working_profiles[target_key] = profile
+                self._remember_peer_mac(connection.info.name, connection.info.address)
                 self._register(connection)
                 registered = True
                 connection.start()
@@ -610,6 +703,7 @@ class ConnectionManager:
                 incoming.close()
                 return
             incoming.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            configure_tcp_liveness(incoming)
             connection = PeerConnection(
                 incoming,
                 self.config,
@@ -629,6 +723,7 @@ class ConnectionManager:
                 connection.close(notify=False)
                 return
             self._working_profiles[connection.info.name.casefold()] = profile
+            self._remember_peer_mac(connection.info.name, connection.info.address)
             self._register(connection)
             registered = True
             connection.start()
@@ -755,6 +850,72 @@ class ConnectionManager:
             self.broadcast(packet)
         except (OSError, ConnectionError):
             pass
+
+    def _remember_peer_mac(self, machine_name: str, address: str) -> str:
+        mac = neighbor_mac(address)
+        if mac:
+            self.persist_peer_mac(machine_name, mac)
+        return mac
+
+    def wake_peer(self, machine_name: str) -> bool:
+        """Wake a connected lock screen or an offline Wake-on-LAN peer."""
+
+        target = next(
+            (
+                candidate
+                for candidate in self.config.resolve_hosts()
+                if candidate.name.casefold() == machine_name.casefold()
+            ),
+            None,
+        )
+        if target is None:
+            return False
+        awake_sent = False
+        machine_id = self.peer_id(target.name)
+        if machine_id is not None:
+            packet = Packet()
+            packet.type = PackageType.AWAKE
+            packet.dest = machine_id
+            packet.machine_name = self.config.machine_name
+            try:
+                self.broadcast(packet)
+                awake_sent = True
+            except (OSError, ConnectionError):
+                pass
+
+        mac = target.mac or self._remember_peer_mac(target.name, target.address)
+        if not mac:
+            if awake_sent:
+                return True
+            self.status_callback(
+                "waking",
+                f"Cannot wake {target.name} until its network adapter MAC has been learned",
+            )
+            return False
+        addresses = tuple(self._numeric_addresses(target.address, resolve=True))
+        sent = wake_on_lan(mac, addresses)
+        if sent:
+            self.status_callback("waking", f"Wake-on-LAN sent to {target.name}")
+            self._authentication_failed.discard(target.name.casefold())
+            self._retry_after[target.name.casefold()] = 0
+            self._reconnect.set()
+        return sent or awake_sent
+
+    def resume_after_suspend(self) -> None:
+        """Invalidate inherited sockets and immediately rebuild both channels."""
+
+        if self._stop.is_set():
+            return
+        with self._lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for connection in connections:
+            connection.close(notify=False)
+        self._authentication_failed.clear()
+        self._retry_after.clear()
+        self._retry_delay.clear()
+        self._reconnect.set()
+        self.status_callback("connecting", "System resumed; rebuilding connections")
 
     def reconnect(self) -> None:
         self.disconnect()

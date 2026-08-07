@@ -11,6 +11,104 @@ from mwb_linux.protocol import Packet, PackageType
 
 
 class ServiceTests(unittest.TestCase):
+    def test_windows_mouse_packets_keep_the_physical_controller_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                machine_name="linux",
+                machine_id=100,
+                auto_connect=False,
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock()
+            packet = Packet()
+            packet.type = PackageType.MOUSE
+            packet.src = 200
+            packet.dest = 100
+            packet.mouse = (1, 2, 3, 0x200)
+
+            service._process_packet(Mock(), packet)
+
+            service.input.inject_mouse.assert_called_once_with(
+                1, 2, 3, 0x200, source_id=200
+            )
+
+    def test_next_machine_packet_is_forwarded_to_linux_controller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                machine_name="linux",
+                machine_id=100,
+                auto_connect=False,
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock()
+            packet = Packet()
+            packet.type = PackageType.NEXT_MACHINE
+            packet.src = 200
+            packet.dest = 100
+            packet.mouse = (800, 32000, 100, 0)
+
+            service._process_packet(Mock(), packet)
+
+            service.input.follow_next_machine.assert_called_once_with(
+                100, 800, 32000, 200
+            )
+
+    def test_hide_mouse_does_not_release_the_unrelated_capture_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(host="windows", secret="0123456789abcdef", auto_connect=False).save(
+                config_path
+            )
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock(remote_active=True, active_remote_name="windows")
+            packet = Packet()
+            packet.type = PackageType.HIDE_MOUSE
+
+            service._process_packet(Mock(), packet)
+
+            service.input.release_local.assert_not_called()
+
+    def test_settings_save_preserves_learned_wake_on_lan_mac(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                secret="0123456789abcdef",
+                machine_name="linux",
+                machine_id=100,
+                remote_machines=[
+                    {
+                        "name": "windows",
+                        "address": "192.168.1.20",
+                        "mac": "aa:bb:cc:dd:ee:ff",
+                    }
+                ],
+                machine_matrix=["linux", "windows", "", ""],
+                auto_connect=False,
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+
+            with patch.object(service, "_replace_runtime_config") as replace:
+                service.update_config(
+                    {
+                        "remote_machines": [
+                            {"name": "windows", "address": "192.168.1.21"}
+                        ]
+                    }
+                )
+
+            candidate = replace.call_args.args[0]
+            self.assertEqual(candidate.remote_machines[0]["mac"], "aa:bb:cc:dd:ee:ff")
+            self.assertEqual(
+                Config.load(config_path).remote_machines[0]["mac"],
+                "aa:bb:cc:dd:ee:ff",
+            )
+
     def test_concurrent_stop_is_serialized_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -83,12 +181,12 @@ class ServiceTests(unittest.TestCase):
                 "connected", "1 connected; windows connection closed"
             )
 
-            service.input.release_local.assert_called_once_with()
+            service.input.recover_active_peer.assert_called_once_with()
 
             service.input.reset_mock()
             service.connection.peer_id.return_value = 200
             service._connection_status("connected", "Connected to windows")
-            service.input.release_local.assert_not_called()
+            service.input.recover_active_peer.assert_not_called()
 
     def test_switch_machine_routes_remote_local_and_rejects_empty_slot(self):
         with tempfile.TemporaryDirectory() as directory:

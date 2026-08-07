@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mwb_linux.config import Config
 from mwb_linux.input import (
@@ -119,6 +119,30 @@ class InputTests(unittest.TestCase):
         self.assertEqual(
             [command[0] for command in bridge.commands].count("start"), 2
         )
+
+    def test_capture_restore_token_is_saved_for_portal_v2_relaunches(self):
+        persisted = []
+        config = Config(machine_name="linux", machine_id=10)
+        manager = InputManager(
+            config,
+            lambda _packet: None,
+            lambda: 20,
+            lambda _message: None,
+            lambda: persisted.append(True),
+            bridge=FakeBridge(),
+        )
+
+        manager._bridge_event(
+            {
+                "type": "response",
+                "id": "capture",
+                "ok": True,
+                "result": {"restore_token": "capture-token", "zones": []},
+            }
+        )
+
+        self.assertEqual(config.capture_restore_token, "capture-token")
+        self.assertEqual(len(persisted), 1)
 
     def test_capture_is_immediately_released_without_a_connected_peer(self):
         bridge = FakeBridge()
@@ -297,6 +321,89 @@ class InputTests(unittest.TestCase):
         self.assertEqual(bridge.commands[0][1]["dy"], 120)
         self.assertEqual(bridge.commands[1][1]["button"], 275)
         self.assertEqual(bridge.commands[2][1]["button"], 276)
+
+    def test_windows_controller_gets_next_machine_at_linux_edge(self):
+        packets = []
+        bridge = FakeBridge()
+        config = Config(
+            machine_name="linux",
+            machine_id=10,
+            remote_machines=[{"name": "windows", "address": "10.0.0.2"}],
+            machine_matrix=["windows", "linux", "", ""],
+        )
+        manager = InputManager(
+            config,
+            packets.append,
+            lambda name=None: 20 if name == "windows" else None,
+            lambda _message: None,
+            peer_name=lambda machine_id: "windows" if machine_id == 20 else None,
+            bridge=bridge,
+        )
+
+        # The entry coordinate is edge-adjacent and must only arm routing.
+        manager.inject_mouse(0, 32768, 0, WM_MOUSEMOVE, source_id=20)
+        manager.inject_mouse(32768, 32768, 0, WM_MOUSEMOVE, source_id=20)
+        manager.inject_mouse(0, 32768, 0, WM_MOUSEMOVE, source_id=20)
+
+        self.assertEqual(bridge.commands[0][0], "inject_pointer_absolute")
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(packets[0].type, PackageType.NEXT_MACHINE)
+        self.assertEqual(packets[0].dest, 20)
+        self.assertEqual(packets[0].mouse, (65535 - 800, 32768, 20, 0))
+
+    def test_next_machine_from_controlled_windows_returns_linux_capture(self):
+        bridge = FakeBridge()
+        manager = InputManager(
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                remote_machines=[{"name": "windows", "address": "10.0.0.2"}],
+                machine_matrix=["linux", "windows", "", ""],
+            ),
+            lambda _packet: None,
+            lambda name=None: 20 if name == "windows" else None,
+            lambda _message: None,
+            peer_name=lambda machine_id: "windows" if machine_id == 20 else None,
+            bridge=bridge,
+        )
+        manager.remote_active = True
+        manager.active_remote_name = "windows"
+
+        manager.follow_next_machine(10, 800, 32768, 20)
+
+        self.assertFalse(manager.remote_active)
+        command, arguments = bridge.commands[-1]
+        self.assertEqual(command, "capture_release")
+        self.assertIn("cursor_position", arguments)
+
+    def test_offline_switch_wakes_then_retries_after_connection(self):
+        connected = False
+        wake = Mock(return_value=True)
+        manager = InputManager(
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                remote_machines=[{"name": "windows", "address": "10.0.0.2"}],
+                machine_matrix=["linux", "windows", "", ""],
+            ),
+            lambda _packet: None,
+            lambda name=None: 20 if connected and name == "windows" else None,
+            lambda _message: None,
+            wake_peer=wake,
+            bridge=FakeBridge(),
+        )
+
+        manager.switch_remote("windows")
+        self.assertEqual(manager._waking_remote_name, "windows")
+        wake.assert_called_once_with("windows")
+
+        connected = True
+        manager._capture_ready = True
+        with patch.object(manager, "_trigger_edge", return_value=True) as trigger:
+            manager.retry_pending_switch()
+
+        self.assertEqual(manager._waking_remote_name, "")
+        trigger.assert_called_once_with()
 
     def test_remote_edge_switches_to_the_next_connected_matrix_pc(self):
         packets = []

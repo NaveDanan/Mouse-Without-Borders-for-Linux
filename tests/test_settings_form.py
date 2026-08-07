@@ -241,7 +241,7 @@ class BackgroundServiceTests(unittest.TestCase):
         window.present.assert_called_once_with()
         window.show_settings.assert_called_once_with()
 
-    def test_indicator_exit_stops_service_releases_hold_and_quits(self):
+    def test_indicator_exit_keeps_portal_service_alive_and_quits_only_ui(self):
         application = SimpleNamespace(
             indicator=SimpleNamespace(stop=Mock()),
             _held_for_indicator=True,
@@ -251,7 +251,7 @@ class BackgroundServiceTests(unittest.TestCase):
         with patch("mwb_linux.ui.control_request", return_value={"ok": True}) as request:
             MouseWithoutBordersApplication.exit_application(application)
 
-        request.assert_called_once_with("quit", timeout=STATUS_TIMEOUT)
+        request.assert_not_called()
         application.indicator.stop.assert_called_once_with()
         application.release.assert_called_once_with()
         application.quit.assert_called_once_with()
@@ -332,8 +332,8 @@ class BackgroundServiceTests(unittest.TestCase):
 class UpdateUiTests(unittest.TestCase):
     def setUp(self):
         self.release = UpdateRelease(
-            version="0.5.0",
-            tag="v0.5.0",
+            version="0.6.0",
+            tag="v0.6.0",
             page_url="https://example.invalid/release",
             asset_name="update.deb",
             asset_url="https://example.invalid/update.deb",
@@ -379,7 +379,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, None, True, True)
 
-        form.update_status.set_text.assert_called_once_with("Up to date (0.4.0)")
+        form.update_status.set_text.assert_called_once_with("Up to date (0.5.0)")
 
     def test_new_version_is_announced_once(self):
         form = SimpleNamespace(
@@ -393,7 +393,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, self.release, False, True)
 
-        form.update_status.set_text.assert_called_once_with("Version 0.5.0 available")
+        form.update_status.set_text.assert_called_once_with("Version 0.6.0 available")
         form._show_update_available.assert_called_once_with(self.release)
 
     def test_update_dialog_shows_current_and_latest_versions(self):
@@ -404,8 +404,8 @@ class UpdateUiTests(unittest.TestCase):
 
         form.present.assert_called_once_with()
         detail = dialog.set_detail.call_args.args[0]
-        self.assertIn("Current version: 0.4.0", detail)
-        self.assertIn("Latest version: 0.5.0", detail)
+        self.assertIn("Current version: 0.5.0", detail)
+        self.assertIn("Latest version: 0.6.0", detail)
         dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
 
     def test_failed_install_keeps_the_application_open(self):

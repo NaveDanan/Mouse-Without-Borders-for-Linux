@@ -1493,14 +1493,13 @@ class MouseWithoutBordersApplication(Adw.Application):
         self.window.show_settings()
 
     def exit_application(self) -> None:
-        """Stop sharing and terminate only from the indicator's Exit item."""
+        """Close the UI while retaining the compositor-approved service session."""
 
-        try:
-            control_request("quit", timeout=STATUS_TIMEOUT)
-        except (OSError, TimeoutError):
-            # An unconfigured or already-stopped service must not prevent the
-            # visible application from honoring Exit.
-            pass
+        # InputCapture v1 (including Ubuntu 24.04) cannot persist a permission
+        # grant as a restore token. The daemon is therefore intentionally a
+        # different lifetime from this settings/indicator process. Users can
+        # stop sharing with Disconnect or explicitly stop the daemon with the
+        # ``quit`` CLI command without making ordinary UI launches re-prompt.
         if self.indicator is not None:
             self.indicator.stop()
         if self._held_for_indicator:

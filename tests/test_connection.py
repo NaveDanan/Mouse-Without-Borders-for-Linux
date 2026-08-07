@@ -1,7 +1,9 @@
 import socket
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from mwb_linux.config import Config
@@ -11,12 +13,127 @@ from mwb_linux.connection import (
     ConnectionManager,
     PeerConnection,
     PeerInfo,
+    configure_tcp_liveness,
+    neighbor_mac,
 )
 from mwb_linux.crypto import CryptoProfile
 from mwb_linux.protocol import Packet, PackageType
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_tcp_connections_use_fast_keepalive_and_user_timeout(self):
+        sock = Mock()
+
+        configure_tcp_liveness(sock)
+
+        sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 15)
+        if hasattr(socket, "TCP_USER_TIMEOUT"):
+            sock.setsockopt.assert_any_call(
+                socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 20_000
+            )
+
+    def test_neighbor_mac_reads_the_kernel_arp_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            arp = Path(directory) / "arp"
+            arp.write_text(
+                "IP address HW type Flags HW address Mask Device\n"
+                "192.168.1.20 0x1 0x2 aa:bb:cc:dd:ee:ff * wlan0\n",
+                encoding="ascii",
+            )
+
+            self.assertEqual(
+                neighbor_mac("192.168.1.20", arp), "aa:bb:cc:dd:ee:ff"
+            )
+
+    def test_wake_peer_sends_awake_to_a_connected_lock_screen(self):
+        manager = ConnectionManager(
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                remote_machines=[{"name": "windows", "address": "192.168.1.20"}],
+                machine_matrix=["linux", "windows", "", ""],
+            ),
+            lambda *_: None,
+            lambda *_: None,
+        )
+        peer = Mock(trusted=True)
+        peer.info = PeerInfo(name="windows", machine_id=20)
+        manager._connections = [peer]
+        manager.broadcast = Mock()
+
+        self.assertTrue(manager.wake_peer("windows"))
+
+        packet = manager.broadcast.call_args.args[0]
+        self.assertEqual(packet.type, PackageType.AWAKE)
+        self.assertEqual(packet.dest, 20)
+        self.assertEqual(packet.machine_name, "linux")
+
+    def test_offline_peer_uses_remembered_mac_for_wake_on_lan(self):
+        statuses = []
+        manager = ConnectionManager(
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                remote_machines=[
+                    {
+                        "name": "windows",
+                        "address": "192.168.1.20",
+                        "mac": "aa:bb:cc:dd:ee:ff",
+                    }
+                ],
+                machine_matrix=["linux", "windows", "", ""],
+            ),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+
+        with patch("mwb_linux.connection.wake_on_lan", return_value=True) as wake:
+            self.assertTrue(manager.wake_peer("windows"))
+
+        self.assertEqual(wake.call_args.args[0], "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(statuses[-1][0], "waking")
+        self.assertTrue(manager._reconnect.is_set())
+
+    def test_resume_discards_stale_sockets_and_retries_immediately(self):
+        statuses = []
+        manager = ConnectionManager(
+            Config(),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+        connection = Mock(trusted=True)
+        connection.info = PeerInfo(name="windows", machine_id=20)
+        manager._connections = [connection]
+        manager._authentication_failed.add("windows")
+        manager._retry_after["windows"] = time.monotonic() + 30
+
+        manager.resume_after_suspend()
+
+        connection.close.assert_called_once_with(notify=False)
+        self.assertFalse(manager.connections)
+        self.assertFalse(manager._authentication_failed)
+        self.assertFalse(manager._retry_after)
+        self.assertTrue(manager._reconnect.is_set())
+        self.assertEqual(statuses[-1], ("connecting", "System resumed; rebuilding connections"))
+
+    def test_connection_worker_detects_a_boottime_suspend_jump(self):
+        manager = ConnectionManager(Config(), lambda *_: None, lambda *_: None)
+        manager._suspend_offset = 0
+        manager._start_listener = Mock()
+
+        def resumed():
+            manager._stop.set()
+
+        with (
+            patch("mwb_linux.connection._suspend_offset", return_value=2),
+            patch.object(manager, "resume_after_suspend", side_effect=resumed) as resume,
+        ):
+            manager._run()
+
+        resume.assert_called_once_with()
+
     def test_offline_host_does_not_block_other_target_attempts(self):
         manager = ConnectionManager(Config(), lambda *_: None, lambda *_: None)
         both_started = threading.Event()
