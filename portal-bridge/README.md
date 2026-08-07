@@ -27,7 +27,8 @@ The portal may display a user-consent dialog. An `init` response is not emitted
 until the portal and EI handshake have completed. Persisted portal tokens are
 single-use; save the replacement `restore_token` returned by every successful
 initialization. InputCapture v1 has no persistence token, so its caller should
-retain the authorized bridge session across network reconnects.
+disable and retain the authorized bridge session while sharing is stopped, then
+enable that same session again on relaunch.
 
 ## Message envelope
 

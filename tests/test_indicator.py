@@ -25,7 +25,7 @@ class IndicatorMenuTests(unittest.TestCase):
         self.assertEqual(root[0], 0)
         self.assertEqual(
             [(child[0], child[1]["label"]) for child in root[2]],
-            [(1, "Open"), (2, "Settings"), (3, "Exit UI (keep sharing)")],
+            [(1, "Open"), (2, "Settings"), (3, "Exit")],
         )
 
     def test_menu_properties_honor_the_requested_filter(self):

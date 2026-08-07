@@ -28,6 +28,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.1" date="2026-08-07">
+      <description>
+        <p>
+          Make the top-bar Exit action stop every sharing path while retaining
+          only a disabled portal authorization session, and reuse that session
+          without another permission prompt when the application is relaunched.
+        </p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-08-07">
       <description>
         <p>

@@ -1,9 +1,14 @@
+import io
+import json
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 from mwb_linux.config import Config
 from mwb_linux.input import (
     InputManager,
+    PortalBridge,
     WINDOWS_EPOCH_TICKS,
     WM_LBUTTONDOWN,
     WM_MOUSEMOVE,
@@ -25,11 +30,67 @@ class FakeBridge:
     def command(self, command, **kwargs):
         self.commands.append((command, kwargs))
 
+    def request(self, command, **kwargs):
+        self.commands.append((command, kwargs))
+        return {"ok": True}
+
     def stop(self):
         self.commands.append(("stop", {}))
 
 
 class InputTests(unittest.TestCase):
+    def test_portal_state_request_waits_for_matching_acknowledgement(self):
+        messages = []
+        bridge = PortalBridge(messages.append)
+        bridge.process = Mock(stdin=io.StringIO())
+        bridge.process.poll.return_value = None
+        outcome = {}
+
+        worker = threading.Thread(
+            target=lambda: outcome.setdefault("response", bridge.request("capture_disable"))
+        )
+        worker.start()
+        deadline = time.monotonic() + 1
+        while not bridge.process.stdin.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        request = json.loads(bridge.process.stdin.getvalue())
+        bridge._dispatch_message(
+            {"type": "response", "id": request["id"], "ok": True, "result": {}}
+        )
+        worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(outcome["response"]["ok"])
+        self.assertEqual(messages[-1]["id"], request["id"])
+
+    def test_pause_disables_capture_and_relaunch_reenables_same_session(self):
+        bridge = FakeBridge()
+        messages = []
+        manager = InputManager(
+            Config(edge_switching=True),
+            Mock(),
+            Mock(return_value=None),
+            messages.append,
+            bridge=bridge,
+        )
+        manager._started = True
+        manager._capture_ready = True
+        manager._capture_enabled = True
+
+        manager.pause()
+        manager.start()
+
+        self.assertEqual(
+            bridge.commands,
+            [
+                ("capture_disable", {}),
+                ("capture_enable", {}),
+            ],
+        )
+        self.assertTrue(manager._started)
+        self.assertTrue(manager._desired)
+        self.assertTrue(manager._capture_enabled)
+
     def test_capture_targets_follow_adjacent_matrix_computers(self):
         config = Config(
             machine_name="linux",
@@ -113,6 +174,7 @@ class InputTests(unittest.TestCase):
         self.assertEqual(
             [command[0] for command in bridge.commands].count("start"), 1
         )
+        self.assertNotIn("capture_enable", [command[0] for command in bridge.commands])
 
         manager.stop()
         manager.start()

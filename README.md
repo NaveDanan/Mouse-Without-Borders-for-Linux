@@ -29,7 +29,7 @@ Download the latest `.deb` from the
 page, then run:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.5.0_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.5.1_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -55,7 +55,7 @@ cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- 
 The package is written to `dist/`. Install a local build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.5.0_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.5.1_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -63,22 +63,24 @@ The first launch opens the setup experience, which asks for the other
 computer's name and its 16-character security key. GNOME then displays its
 normal Input Capture and Remote Desktop permission dialogs. The compositor must
 receive the first approval from the signed-in user; an application cannot grant
-itself global input access. The background service retains that approved portal
-session across UI exits and launches, Connect, Disconnect, Reconnect, suspend,
-and compatible settings changes. InputCapture v2 desktops also persist the
-compositor's restore token. Ubuntu 24.04 exposes InputCapture v1, so an explicit
-`quit`, logout, permission revocation, or monitor-edge change can still require
-approval; ordinary application launches do not. The service never reads
+itself global input access. The background service retains the approved portal
+session across launches, Connect, Disconnect, Reconnect, suspend, and compatible
+settings changes. On **Exit**, that session is disabled before all network and
+clipboard activity stops; only the dormant authorization holder remains, so
+relaunching does not prompt again. InputCapture v2 desktops also persist the
+compositor's restore token. A logout, permission revocation, monitor-edge change,
+or the explicit `quit` command can still require approval. The service never reads
 `/dev/input`, writes `/dev/uinput`, or runs as root.
 
 While the UI is running, its Mouse Without Borders indicator remains visible in
 Ubuntu's top bar. Closing the settings window with its **x** or **Close** button
-hides the window without stopping sharing. **Exit UI (keep sharing)** closes the
-settings/indicator process but deliberately retains the approved background
-portal session. Use Disconnect to pause connections while retaining permission,
-or the `quit` command when the daemon itself must be stopped. The indicator uses
-Ubuntu's built-in StatusNotifierItem/AppIndicator integration and does not load
-GTK 3 into the GTK 4 application.
+hides the window without stopping sharing. **Exit** closes the settings and
+indicator, disconnects every peer, stops clipboard watching, releases any active
+input, and disables screen-edge capture. A dormant authorization holder remains
+only because InputCapture v1 cannot otherwise avoid asking again on relaunch.
+Use the `quit` command to destroy that authorization session as well. The
+indicator uses Ubuntu's built-in StatusNotifierItem/AppIndicator integration
+and does not load GTK 3 into the GTK 4 application.
 
 On each launch, the application checks the latest stable GitHub release in the
 background. Being up to date and temporary network failures are silent. The

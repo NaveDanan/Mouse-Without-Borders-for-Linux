@@ -11,6 +11,41 @@ from mwb_linux.protocol import Packet, PackageType
 
 
 class ServiceTests(unittest.TestCase):
+    def test_top_bar_exit_stops_every_sharing_path_and_parks_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            input_manager = Mock()
+            connection = Mock()
+            clipboard = Mock()
+            service.input = input_manager
+            service.connection = connection
+            service.clipboard = clipboard
+
+            service.exit_ui()
+
+            input_manager.pause.assert_called_once_with()
+            connection.stop.assert_called_once_with()
+            clipboard.stop.assert_called_once_with()
+            self.assertIsNone(service.connection)
+            self.assertIsNone(service.clipboard)
+            self.assertFalse(service._connection_requested)
+            self.assertTrue(service.status()["ui_exited"])
+            self.assertEqual(service.status()["state"], "dormant")
+
+    def test_ui_relaunch_resumes_only_a_service_parked_by_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            with patch.object(service, "connect") as connect:
+                service.resume_ui()
+                connect.assert_not_called()
+                service._ui_exited = True
+                service.resume_ui()
+                connect.assert_called_once_with()
+
     def test_windows_mouse_packets_keep_the_physical_controller_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"

@@ -114,7 +114,7 @@ MENU_XML = f"""
 MENU_ITEMS = {
     1: "Open",
     2: "Settings",
-    3: "Exit UI (keep sharing)",
+    3: "Exit",
 }
 
 

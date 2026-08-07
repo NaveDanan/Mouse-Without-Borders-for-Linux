@@ -241,7 +241,7 @@ class BackgroundServiceTests(unittest.TestCase):
         window.present.assert_called_once_with()
         window.show_settings.assert_called_once_with()
 
-    def test_indicator_exit_keeps_portal_service_alive_and_quits_only_ui(self):
+    def test_indicator_exit_stops_sharing_before_quitting_ui(self):
         application = SimpleNamespace(
             indicator=SimpleNamespace(stop=Mock()),
             _held_for_indicator=True,
@@ -251,11 +251,52 @@ class BackgroundServiceTests(unittest.TestCase):
         with patch("mwb_linux.ui.control_request", return_value={"ok": True}) as request:
             MouseWithoutBordersApplication.exit_application(application)
 
-        request.assert_not_called()
+        request.assert_called_once_with("exit_ui")
         application.indicator.stop.assert_called_once_with()
         application.release.assert_called_once_with()
         application.quit.assert_called_once_with()
         self.assertFalse(application._held_for_indicator)
+
+    def test_indicator_exit_fails_closed_when_service_does_not_acknowledge(self):
+        application = SimpleNamespace(
+            indicator=SimpleNamespace(stop=Mock()),
+            _held_for_indicator=True,
+            release=Mock(),
+            quit=Mock(),
+        )
+        with (
+            patch("mwb_linux.ui.control_request", side_effect=OSError("gone")),
+            patch("mwb_linux.ui.subprocess.run") as run,
+        ):
+            MouseWithoutBordersApplication.exit_application(application)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "systemctl",
+                "--user",
+                "stop",
+                "app-io.github.NaveDanan.MouseWithoutBorders.service",
+            ],
+        )
+
+    def test_indicator_exit_fails_closed_when_an_old_daemon_rejects_command(self):
+        application = SimpleNamespace(
+            indicator=SimpleNamespace(stop=Mock()),
+            _held_for_indicator=True,
+            release=Mock(),
+            quit=Mock(),
+        )
+        with (
+            patch(
+                "mwb_linux.ui.control_request",
+                return_value={"ok": False, "error": "unknown command"},
+            ),
+            patch("mwb_linux.ui.subprocess.run") as run,
+        ):
+            MouseWithoutBordersApplication.exit_application(application)
+
+        run.assert_called_once()
 
     def test_installed_ui_starts_the_canonical_app_unit(self):
         with (
@@ -379,7 +420,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, None, True, True)
 
-        form.update_status.set_text.assert_called_once_with("Up to date (0.5.0)")
+        form.update_status.set_text.assert_called_once_with("Up to date (0.5.1)")
 
     def test_new_version_is_announced_once(self):
         form = SimpleNamespace(
@@ -404,7 +445,7 @@ class UpdateUiTests(unittest.TestCase):
 
         form.present.assert_called_once_with()
         detail = dialog.set_detail.call_args.args[0]
-        self.assertIn("Current version: 0.5.0", detail)
+        self.assertIn("Current version: 0.5.1", detail)
         self.assertIn("Latest version: 0.6.0", detail)
         dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
 

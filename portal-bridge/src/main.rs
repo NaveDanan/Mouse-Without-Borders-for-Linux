@@ -65,6 +65,22 @@ impl Bridge {
                     .await?;
                 Ok((json!({ "released": true }), false))
             }
+            Command::CaptureEnable { .. } => {
+                self.capture
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("input capture is not initialized"))?
+                    .enable()
+                    .await?;
+                Ok((json!({ "enabled": true }), false))
+            }
+            Command::CaptureDisable { .. } => {
+                self.capture
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("input capture is not initialized"))?
+                    .disable()
+                    .await?;
+                Ok((json!({ "disabled": true }), false))
+            }
             Command::CaptureStop { .. } => {
                 let capture = self
                     .capture

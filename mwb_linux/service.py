@@ -73,6 +73,7 @@ class MouseWithoutBordersService:
         # user presses Connect, applying settings must keep the session alive;
         # once they press Disconnect, Windows reverse channels must stay off.
         self._connection_requested = self.config.auto_connect
+        self._ui_exited = False
         self._status = {
             "state": "stopped",
             "message": "Not started",
@@ -335,6 +336,7 @@ class MouseWithoutBordersService:
                 "peers": [asdict(item) for item in peers],
                 "remote_active": bool(self.input and self.input.remote_active),
                 "active_remote_name": self.input.active_remote_name if self.input else "",
+                "ui_exited": self._ui_exited,
             }
         )
         return status
@@ -400,10 +402,12 @@ class MouseWithoutBordersService:
             return
 
     def reconnect(self) -> None:
+        self._ui_exited = False
         self._connection_requested = True
         self._replace_runtime_config(Config.load(self.config_path))
 
     def connect(self) -> None:
+        self._ui_exited = False
         self._connection_requested = True
         if not self.connection:
             self._start_components()
@@ -422,6 +426,30 @@ class MouseWithoutBordersService:
             self.input.release_local()
         self._stop_connection()
         self._set_status("disconnected", "Disconnected")
+
+    def exit_ui(self) -> None:
+        """Stop every sharing path but retain a disabled portal grant.
+
+        InputCapture v1 cannot serialize permission grants. Keeping its session
+        disabled is the only way to make a later UI launch prompt-free; network,
+        clipboard, and capture activity are all stopped before returning.
+        """
+
+        self._connection_requested = False
+        self._ui_exited = True
+        if self.input:
+            self.input.pause()
+        self._stop_connection()
+        if self.clipboard:
+            self.clipboard.stop()
+            self.clipboard = None
+        self._set_status("dormant", "Exited; mouse and keyboard sharing stopped")
+
+    def resume_ui(self) -> None:
+        """Resume only a service deliberately parked by the top-bar Exit."""
+
+        if self._ui_exited:
+            self.connect()
 
     @staticmethod
     def _apply_shortcuts(config: Config) -> None:
@@ -547,6 +575,10 @@ class MouseWithoutBordersService:
             self.update_config(request.get("config", {}))
         elif command == "quit":
             threading.Thread(target=self.stop, daemon=True).start()
+        elif command == "exit_ui":
+            self.exit_ui()
+        elif command == "resume_ui":
+            self.resume_ui()
         else:
             return {"ok": False, "error": f"unknown command: {command}"}
         return {"ok": True, "status": self.status()}

@@ -70,6 +70,14 @@ pub enum Command {
         #[serde(default)]
         cursor_position: Option<[f64; 2]>,
     },
+    CaptureEnable {
+        #[serde(default)]
+        id: Option<Value>,
+    },
+    CaptureDisable {
+        #[serde(default)]
+        id: Option<Value>,
+    },
     CaptureStop {
         #[serde(default)]
         id: Option<Value>,
@@ -128,6 +136,8 @@ impl Command {
             Self::Ping { id }
             | Self::CaptureInit { id, .. }
             | Self::CaptureRelease { id, .. }
+            | Self::CaptureEnable { id }
+            | Self::CaptureDisable { id }
             | Self::CaptureStop { id }
             | Self::InjectInit { id, .. }
             | Self::InjectKey { id, .. }
@@ -254,6 +264,22 @@ mod tests {
                 dx: 0.0,
                 dy: 120.0,
                 discrete: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_capture_enable_and_disable() {
+        assert_eq!(
+            serde_json::from_str::<Command>(r#"{"command":"capture_enable","id":"on"}"#).unwrap(),
+            Command::CaptureEnable {
+                id: Some(json!("on")),
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<Command>(r#"{"command":"capture_disable","id":"off"}"#).unwrap(),
+            Command::CaptureDisable {
+                id: Some(json!("off")),
             }
         );
     }

@@ -140,6 +140,8 @@ class PortalBridge:
         self.event_callback = event_callback
         self.process: subprocess.Popen[str] | None = None
         self._write_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_responses: dict[str, tuple[threading.Event, dict]] = {}
         self._stopping = False
 
     def start(
@@ -188,11 +190,30 @@ class PortalBridge:
         assert self.process and self.process.stdout
         for line in self.process.stdout:
             try:
-                self.event_callback(json.loads(line))
+                self._dispatch_message(json.loads(line))
             except (json.JSONDecodeError, TypeError) as exc:
                 LOGGER.warning("invalid portal bridge response: %s", exc)
+        with self._pending_lock:
+            pending = list(self._pending_responses.values())
+        for event, result in pending:
+            result["response"] = {
+                "ok": False,
+                "error": "portal bridge stopped before replying",
+            }
+            event.set()
         if not self._stopping:
             self.event_callback({"type": "event", "event": "bridge_stopped"})
+
+    def _dispatch_message(self, message: dict) -> None:
+        if message.get("type") == "response":
+            request_id = message.get("id")
+            with self._pending_lock:
+                pending = self._pending_responses.get(request_id)
+            if pending:
+                event, result = pending
+                result["response"] = message
+                event.set()
+        self.event_callback(message)
 
     def _stderr_loop(self) -> None:
         assert self.process and self.process.stderr
@@ -206,6 +227,30 @@ class PortalBridge:
         with self._write_lock:
             self.process.stdin.write(message + "\n")
             self.process.stdin.flush()
+
+    def request(
+        self, command: str, *, timeout: float = 3.0, **arguments: object
+    ) -> dict:
+        """Send a state-changing command and wait for its acknowledgement."""
+
+        request_id = f"python-{time.monotonic_ns()}"
+        event = threading.Event()
+        result: dict = {}
+        with self._pending_lock:
+            self._pending_responses[request_id] = (event, result)
+        try:
+            self.command(command, id=request_id, **arguments)
+            if not event.wait(timeout):
+                raise TimeoutError(f"portal bridge did not acknowledge {command}")
+            response = result["response"]
+            if not response.get("ok"):
+                raise ConnectionError(
+                    str(response.get("error", f"portal bridge rejected {command}"))
+                )
+            return response
+        finally:
+            with self._pending_lock:
+                self._pending_responses.pop(request_id, None)
 
     def stop(self) -> None:
         if not self.process:
@@ -262,6 +307,7 @@ class InputManager:
         self._started = False
         self._desired = False
         self._capture_ready = False
+        self._capture_enabled = False
         self._restart_lock = threading.Lock()
         self._restart_scheduled = False
         self._pending_remote_name = ""
@@ -290,6 +336,17 @@ class InputManager:
     def start(self) -> None:
         self._desired = True
         if self._started:
+            if (
+                self.config.edge_switching
+                and self._capture_ready
+                and not self._capture_enabled
+            ):
+                try:
+                    self.bridge.request("capture_enable")
+                    self._capture_enabled = True
+                    self.status_callback("Screen-edge capture resumed")
+                except (ConnectionError, TimeoutError) as exc:
+                    self.status_callback(f"Input unavailable: {exc}")
             return
         try:
             self._capture_ready = not self.config.edge_switching
@@ -302,11 +359,44 @@ class InputManager:
                 targets=capture_targets(self.config),
             )
             self._started = True
+            # InputCapture initialization is asynchronous and may still be
+            # displaying the first-run consent dialog.
+            self._capture_enabled = False
             self.status_callback("Portal permission requested")
         except (FileNotFoundError, OSError, ConnectionError) as exc:
             self._started = False
             self.status_callback(f"Input unavailable: {exc}")
             LOGGER.warning("input portal unavailable: %s", exc)
+
+    def pause(self) -> None:
+        """Stop sharing while retaining the compositor's approved session."""
+
+        self._desired = False
+        self.release_local()
+        LOGGER.info(
+            "pausing portal bridge: started=%s capture_ready=%s capture_enabled=%s",
+            self._started,
+            self._capture_ready,
+            self._capture_enabled,
+        )
+        if self._started and not self._capture_ready:
+            # There is no approved session to preserve yet. Closing the bridge
+            # also closes an unanswered portal prompt when the user exits.
+            self.bridge.stop()
+            self._started = False
+        elif self._started and self._capture_enabled:
+            try:
+                self.bridge.request("capture_disable")
+            except (ConnectionError, TimeoutError) as exc:
+                # Exit must fail closed even if the compositor does not
+                # acknowledge Disable. Closing the session guarantees that no
+                # capture remains active, at the cost of another prompt later.
+                LOGGER.warning("could not disable the portal capture session: %s", exc)
+                self.bridge.stop()
+                self._started = False
+                self._capture_ready = False
+        self._capture_enabled = False
+        self.status_callback("Input sharing stopped")
 
     def stop(self) -> None:
         self._desired = False
@@ -314,6 +404,7 @@ class InputManager:
         self.bridge.stop()
         self._started = False
         self._capture_ready = False
+        self._capture_enabled = False
 
     def switch_remote(self, machine_name: str | None = None) -> None:
         if machine_name:
@@ -545,6 +636,7 @@ class InputManager:
                     self.height = max(1, bottom - top)
                 self.status_callback("Screen-edge capture ready")
                 self._capture_ready = True
+                self._capture_enabled = True
                 self.retry_pending_switch()
             elif event.get("id") == "inject":
                 token = event.get("result", {}).get("restore_token")

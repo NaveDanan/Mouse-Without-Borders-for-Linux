@@ -9,8 +9,8 @@ use ashpd::Error as PortalError;
 use ashpd::desktop::PersistMode;
 use ashpd::desktop::input_capture::{
     ActivatedBarrier, Barrier, BarrierID, Capabilities, ConnectToEISOptions, CreateSession2Options,
-    CreateSessionOptions, EnableOptions, InputCapture, ReleaseOptions, SetPointerBarriersOptions,
-    StartOptions,
+    CreateSessionOptions, DisableOptions, EnableOptions, InputCapture, ReleaseOptions,
+    SetPointerBarriersOptions, StartOptions,
 };
 use futures_util::StreamExt;
 use reis::ei::{self, button, keyboard};
@@ -58,6 +58,12 @@ enum CaptureControl {
         cursor_position: Option<[f64; 2]>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    Enable {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Disable {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Stop {
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -76,6 +82,30 @@ impl CaptureHandle {
                 cursor_position,
                 reply,
             })
+            .await
+            .map_err(|_| anyhow!("input capture task is not running"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("input capture task stopped without replying"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub async fn enable(&self) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.control
+            .send(CaptureControl::Enable { reply })
+            .await
+            .map_err(|_| anyhow!("input capture task is not running"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("input capture task stopped without replying"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub async fn disable(&self) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.control
+            .send(CaptureControl::Disable { reply })
             .await
             .map_err(|_| anyhow!("input capture task is not running"))?;
         response
@@ -296,6 +326,30 @@ async fn run_capture(
                         let result = release_capture(&portal, &session, &mut active, cursor_position)
                             .await
                             .map_err(|error| format!("{error:#}"));
+                        let _ = reply.send(result);
+                    }
+                    CaptureControl::Enable { reply } => {
+                        let result = portal
+                            .enable(&session, EnableOptions::default())
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    CaptureControl::Disable { reply } => {
+                        let release_result = if active.is_some() {
+                            release_capture(&portal, &session, &mut active, None)
+                                .await
+                                .map_err(|error| format!("{error:#}"))
+                        } else {
+                            Ok(())
+                        };
+                        let result = match release_result {
+                            Ok(()) => portal
+                                .disable(&session, DisableOptions::default())
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        };
                         let _ = reply.send(result);
                     }
                     CaptureControl::Stop { reply } => {

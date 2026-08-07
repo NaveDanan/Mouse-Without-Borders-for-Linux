@@ -1480,6 +1480,13 @@ class MouseWithoutBordersApplication(Adw.Application):
         self.indicator.start()
 
     def do_activate(self) -> None:
+        # A previous top-bar Exit leaves only a disabled portal grant alive.
+        # Reconnect and re-enable it now, without asking for permission again.
+        threading.Thread(
+            target=lambda: _request("resume_ui"),
+            name="mwb-service-resume",
+            daemon=True,
+        ).start()
         self.open_window()
 
     def open_window(self) -> None:
@@ -1493,13 +1500,27 @@ class MouseWithoutBordersApplication(Adw.Application):
         self.window.show_settings()
 
     def exit_application(self) -> None:
-        """Close the UI while retaining the compositor-approved service session."""
+        """Stop all sharing and close the UI."""
 
-        # InputCapture v1 (including Ubuntu 24.04) cannot persist a permission
-        # grant as a restore token. The daemon is therefore intentionally a
-        # different lifetime from this settings/indicator process. Users can
-        # stop sharing with Disconnect or explicitly stop the daemon with the
-        # ``quit`` CLI command without making ordinary UI launches re-prompt.
+        try:
+            response = control_request("exit_ui")
+            if not response.get("ok"):
+                raise OSError(str(response.get("error", "exit was rejected")))
+        except (OSError, TimeoutError) as exc:
+            # Fail closed: if the daemon cannot acknowledge the dormant state,
+            # stop its unit so Exit can never leave input sharing active.
+            LOGGER.warning("could not stop sharing cleanly: %s", exc)
+            try:
+                subprocess.run(
+                    ["systemctl", "--user", "stop", SYSTEMD_UNIT],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as stop_error:
+                LOGGER.error("could not stop the sharing service: %s", stop_error)
         if self.indicator is not None:
             self.indicator.stop()
         if self._held_for_indicator:

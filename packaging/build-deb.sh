@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LINUX_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-VERSION=${VERSION:-0.5.0}
+VERSION=${VERSION:-0.5.1}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 BUILD_ROOT="$LINUX_DIR/build/deb-root"
 DIST_DIR="$LINUX_DIR/dist"
