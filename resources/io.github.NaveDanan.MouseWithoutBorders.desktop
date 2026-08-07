@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Mouse Without Borders
+Comment=Share a mouse, keyboard, and clipboard across Linux and Windows PCs
+Exec=powertoys-mouse-without-borders
+Icon=io.github.NaveDanan.MouseWithoutBorders
+Terminal=false
+Categories=Utility;GTK;
+Keywords=mouse;keyboard;clipboard;PowerToys;remote;
+StartupNotify=true
+DBusActivatable=false

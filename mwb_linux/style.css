@@ -1,0 +1,435 @@
+/*
+ * Classic Mouse Without Borders settings form.
+ * Colours, metrics, and typography intentionally mirror the Windows form.
+ */
+
+.mwb-root {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, "DejaVu Sans", sans-serif;
+  font-size: 12px;
+  color: #000000;
+  background-color: #f0f0f0;
+}
+
+/* ----------------------------------------------------------- title bar */
+
+.mwb-titlebar {
+  background: #ffffff;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 6px 4px 6px 10px;
+  min-height: 0;
+}
+
+.mwb-titlebar-text {
+  color: #000000;
+}
+
+.mwb-window-button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: #444444;
+  font-size: 11px;
+  min-width: 24px;
+  min-height: 20px;
+  padding: 0;
+  margin: 0 3px;
+  border-radius: 2px;
+}
+
+.mwb-window-button:hover {
+  background: #e5e5e5;
+}
+
+.mwb-window-button.close:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+
+/* --------------------------------------------------------------- body */
+
+.mwb-body {
+  background-color: #f9f9f9;
+  padding: 8px 12px 14px 12px;
+}
+
+.mwb-tab {
+  background: #f0f0f0;
+  background-image: none;
+  border: 1px solid #a0a0a0;
+  border-bottom: none;
+  border-radius: 0;
+  box-shadow: none;
+  color: #000000;
+  padding: 3px 10px;
+  margin: 0 2px 0 0;
+  min-height: 0;
+  min-width: 0;
+  font-weight: normal;
+}
+
+.mwb-tab:hover {
+  background: #f7f7f7;
+}
+
+.mwb-tab:checked {
+  background: #ffffff;
+  font-weight: normal;
+}
+
+.mwb-link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0 0 0 8px;
+  min-height: 0;
+  min-width: 0;
+  color: #0066cc;
+  font-size: 11px;
+}
+
+.mwb-link:hover {
+  color: #004c99;
+}
+
+/* ----------------------------------------------------------- fieldsets */
+
+.mwb-fieldset {
+  border: 1px solid #d0d0d0;
+  border-radius: 2px;
+  background: #ffffff;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+
+.mwb-legend {
+  background: #ffffff;
+  color: #111111;
+  padding: 0 4px;
+}
+
+/* ------------------------------------------------------------- widgets */
+
+.mwb-root entry {
+  border: 1px solid #acacac;
+  border-radius: 2px;
+  background: #ffffff;
+  background-image: none;
+  box-shadow: none;
+  color: #000000;
+  min-height: 0;
+  padding: 3px 6px;
+  caret-color: #000000;
+}
+
+.mwb-root entry:focus-within {
+  border-color: #0078d7;
+  outline: none;
+}
+
+.mwb-root entry.mwb-key-entry {
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 14px;
+}
+
+.mwb-root button.mwb-button {
+  background: #e1e1e1;
+  background-image: none;
+  border: 1px solid #adadad;
+  border-radius: 3px;
+  box-shadow: none;
+  color: #000000;
+  padding: 2px 14px;
+  min-height: 0;
+  min-width: 0;
+  font-weight: normal;
+}
+
+.mwb-root button.mwb-button:hover {
+  background: #e5f1fb;
+  border-color: #0078d7;
+}
+
+.mwb-root button.mwb-button:active {
+  background: #cce4f7;
+  border-color: #005499;
+}
+
+.mwb-root button.mwb-button.mwb-dialog-button {
+  min-width: 72px;
+  padding: 3px 0;
+}
+
+.mwb-root checkbutton {
+  min-height: 0;
+  padding: 0;
+  color: #000000;
+}
+
+.mwb-root checkbutton check,
+.mwb-root checkbutton radio {
+  min-width: 13px;
+  min-height: 13px;
+  padding: 0;
+  margin: 0 2px 0 0;
+  background: #ffffff;
+  background-image: none;
+  border: 1px solid #767676;
+  border-radius: 2px;
+  box-shadow: none;
+  color: #000000;
+  -gtk-icon-size: 13px;
+}
+
+.mwb-root checkbutton radio {
+  border-radius: 50%;
+}
+
+.mwb-root checkbutton check:hover,
+.mwb-root checkbutton radio:hover {
+  border-color: #0078d7;
+}
+
+.mwb-root checkbutton check:checked,
+.mwb-root checkbutton check:indeterminate,
+.mwb-root checkbutton radio:checked {
+  background: #ffffff;
+  background-image: none;
+  border-color: #767676;
+  color: #000000;
+}
+
+.mwb-root checkbutton:disabled,
+.mwb-root checkbutton:disabled check {
+  opacity: 0.6;
+}
+
+.mwb-root dropdown.mwb-select > button {
+  background: #ffffff;
+  background-image: none;
+  border: 1px solid #acacac;
+  border-radius: 2px;
+  box-shadow: none;
+  color: #000000;
+  font-size: 11px;
+  min-height: 0;
+  min-width: 0;
+  padding: 1px 2px;
+}
+
+.mwb-root dropdown.mwb-select > button:hover {
+  border-color: #0078d7;
+}
+
+.mwb-root spinbutton {
+  border: 1px solid #acacac;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: none;
+  min-height: 0;
+}
+
+/* -------------------------------------------------------- matrix cards */
+
+.mwb-monitor {
+  border: 2px solid #b0b0b0;
+  border-radius: 3px;
+  background: #d8d8d8;
+  padding: 2px;
+}
+
+.mwb-monitor.mwb-drop-target {
+  border-color: #0078d7;
+}
+
+.mwb-screen {
+  border: 1px solid #666666;
+  background-image: linear-gradient(135deg, #5b84b1, #3c5a7d);
+}
+
+.mwb-screen.off {
+  background-image: linear-gradient(135deg, #888888, #555555);
+}
+
+.mwb-root entry.mwb-comp-name {
+  background: #f4f4f4;
+  border: 1px solid #d9d9d9;
+  border-radius: 0;
+  font-size: 11px;
+  color: #333333;
+  padding: 1px 2px;
+  min-height: 0;
+}
+
+.mwb-root entry.mwb-comp-name:disabled {
+  background: #f4f4f4;
+  color: #333333;
+}
+
+.mwb-comp-status {
+  font-size: 11px;
+  color: #222222;
+}
+
+.mwb-desc {
+  color: #000000;
+}
+
+.mwb-root textview.mwb-ip-text,
+.mwb-root textview.mwb-ip-text text {
+  background: #ffffff;
+  color: #000000;
+  font-size: 13px;
+}
+
+.mwb-textview-frame {
+  border: 1px solid #acacac;
+  border-radius: 2px;
+  background: #ffffff;
+  padding: 4px;
+}
+
+.mwb-watermark {
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 32px;
+  letter-spacing: 2px;
+  color: #40c040;
+  text-shadow: 1px 1px 0 #208020;
+  opacity: 0.35;
+}
+
+/* ================================================== setup experience */
+
+.mwb-setup-titlebar {
+  background: #f3f3f3;
+  border-bottom: 1px solid #dcdcdc;
+  padding: 6px 12px;
+  min-height: 0;
+}
+
+.mwb-setup-title-text {
+  color: #1181cd;
+  font-weight: bold;
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+
+.mwb-setup-close {
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: #1181cd;
+  font-weight: bold;
+  font-size: 13px;
+  min-height: 0;
+  min-width: 20px;
+  padding: 0;
+}
+
+.mwb-setup-body {
+  background-image: radial-gradient(circle at 50% 35%, #2a9cdb 0%, #1771b0 100%);
+  padding: 16px 36px 24px 36px;
+  color: #ffffff;
+}
+
+.mwb-setup-body label {
+  color: #ffffff;
+}
+
+.mwb-setup-heading {
+  font-size: 42px;
+  font-weight: 300;
+  color: #ffffff;
+  letter-spacing: 1px;
+}
+
+.mwb-setup-heading.small {
+  font-size: 38px;
+}
+
+.mwb-setup-text {
+  font-size: 14px;
+  color: #ffffff;
+}
+
+.mwb-setup-divider {
+  background: alpha(#ffffff, 0.7);
+  min-height: 1px;
+}
+
+.mwb-setup-link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: #ffffff;
+  font-size: 13px;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.mwb-setup-help-link {
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.mwb-setup-back {
+  background: none;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: none;
+  color: #ffffff;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+}
+
+.mwb-setup-back:hover {
+  background: alpha(#ffffff, 0.2);
+}
+
+.mwb-setup-circle {
+  background: none;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: none;
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: bold;
+  min-width: 68px;
+  min-height: 68px;
+  padding: 0;
+}
+
+.mwb-setup-circle:hover {
+  background: alpha(#ffffff, 0.2);
+}
+
+.mwb-setup-info-label {
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  color: #79d0fd;
+}
+
+.mwb-setup-info-value {
+  font-size: 26px;
+  color: #ffffff;
+  letter-spacing: 1px;
+}
+
+.mwb-setup-body entry.mwb-setup-input {
+  background: #ffffff;
+  border: 2px solid #ff9d00;
+  border-radius: 0;
+  box-shadow: none;
+  color: #000000;
+  font-size: 14px;
+  min-height: 24px;
+  padding: 4px 8px;
+}
+
+.mwb-setup-body entry.mwb-setup-input.secondary {
+  border: 1px solid #b0c4de;
+}

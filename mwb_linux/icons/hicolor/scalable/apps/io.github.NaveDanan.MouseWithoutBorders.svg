@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+  <title>Mouse Without Borders</title>
+  <path fill="#FF7A00" d="M 250,250 L 108.58,108.58 L 77.47,139.69 L 165.78,228 H 0 V 272 H 165.78 L 77.47,360.31 L 108.58,391.42 Z" />
+  <path fill="#FF7A00" d="M 250,250 L 391.42,108.58 L 422.53,139.69 L 334.22,228 H 500 V 272 H 334.22 L 422.53,360.31 L 391.42,391.42 Z" />
+  <rect x="178" y="118" width="34" height="34" rx="2" transform="rotate(45 195 135)" fill="#363636" />
+  <rect x="288" y="118" width="34" height="34" rx="2" transform="rotate(45 305 135)" fill="#363636" />
+</svg>

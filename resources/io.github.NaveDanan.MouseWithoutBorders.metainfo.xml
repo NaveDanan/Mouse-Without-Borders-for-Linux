@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.NaveDanan.MouseWithoutBorders</id>
+  <name>Mouse Without Borders</name>
+  <summary>Share input and clipboard across Linux and Windows PCs</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.NaveDanan">
+    <name>Nave Danan and contributors</name>
+  </developer>
+  <url type="homepage">https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux</url>
+  <url type="bugtracker">https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux/issues</url>
+  <description>
+    <p>
+      An independent Linux implementation and adaptation of PowerToys Mouse
+      Without Borders. It connects Debian-based Linux and Windows PCs using
+      the native encrypted protocol and shares keyboard, pointer, text
+      clipboard, and PNG clipboard input.
+    </p>
+    <p>
+      Wayland input uses the desktop InputCapture and RemoteDesktop portals,
+      so the compositor remains in control and no root input helper is used.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.NaveDanan.MouseWithoutBorders.desktop</launchable>
+  <provides>
+    <binary>powertoys-mouse-without-borders</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.3.0" date="2026-08-07">
+      <description>
+        <p>
+          Add the four-computer matrix, concurrent multi-PC connections,
+          directed input routing, multi-edge portal capture, four machine
+          shortcuts, full bottom-edge pointer reach, and background-launch
+          isolation for clipboard helpers, plus an Ubuntu top-bar indicator
+          with close-to-background, Open, Settings, and Exit actions.
+        </p>
+      </description>
+    </release>
+    <release version="0.2.1" date="2026-08-07">
+      <description>
+        <p>
+          Add compatibility with the final standalone Windows release, connect
+          the settings controls to the live service, and reuse approved portal
+          sessions across network reconnects.
+        </p>
+      </description>
+    </release>
+    <release version="0.2.0" date="2026-08-07">
+      <description>
+        <p>
+          Rebuild the settings window as the classic Mouse without Borders
+          form, and draw the computer matrix from the monitors this computer
+          really has so the thumbnail layout picks the screen edge that hands
+          the pointer to the other computer.
+        </p>
+      </description>
+    </release>
+    <release version="0.1.2" date="2026-08-06">
+      <description>
+        <p>Make connection listener restarts immediate and race-free.</p>
+      </description>
+    </release>
+    <release version="0.1.1" date="2026-08-06">
+      <description>
+        <p>Use the packaged systemd user service when the settings UI starts.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-08-06"/>
+  </releases>
+</component>

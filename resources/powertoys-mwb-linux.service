@@ -1,0 +1,12 @@
+[Unit]
+Description=PowerToys Mouse Without Borders legacy service alias
+Requires=app-io.github.NaveDanan.MouseWithoutBorders.service
+After=app-io.github.NaveDanan.MouseWithoutBorders.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+RemainAfterExit=true
+
+[Install]
+WantedBy=graphical-session.target

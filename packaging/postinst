@@ -1,0 +1,51 @@
+#!/bin/sh
+set -u
+
+LEGACY_UNIT=powertoys-mwb-linux.service
+POWERTOYS_UNIT=app-com.microsoft.PowerToys.MouseWithoutBorders.Linux.service
+APP_UNIT=app-io.github.NaveDanan.MouseWithoutBorders.service
+
+[ "${1:-}" = configure ] || exit 0
+command -v loginctl >/dev/null 2>&1 || exit 0
+command -v runuser >/dev/null 2>&1 || exit 0
+
+# Migrate every currently logged-in user's enabled/running 0.1.x unit. Package
+# installation runs as root, while user systemd managers are reachable through
+# their private runtime bus and must be controlled as the owning user.
+loginctl list-users --no-legend 2>/dev/null | while read -r uid user _rest; do
+    case "$uid" in
+        ''|*[!0-9]*) continue ;;
+    esac
+    [ "$uid" -gt 0 ] || continue
+    runtime_dir="/run/user/$uid"
+    [ -S "$runtime_dir/bus" ] || continue
+
+    user_systemctl() {
+        runuser -u "$user" -- env \
+            XDG_RUNTIME_DIR="$runtime_dir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+            systemctl --user "$@"
+    }
+
+    was_active=false
+    was_enabled=false
+    for previous_unit in "$LEGACY_UNIT" "$POWERTOYS_UNIT"; do
+        if user_systemctl is-active --quiet "$previous_unit"; then
+            was_active=true
+            user_systemctl stop "$previous_unit" >/dev/null 2>&1 || true
+        fi
+        if user_systemctl is-enabled --quiet "$previous_unit"; then
+            was_enabled=true
+            user_systemctl disable "$previous_unit" >/dev/null 2>&1 || true
+        fi
+    done
+    user_systemctl daemon-reload >/dev/null 2>&1 || true
+    if [ "$was_enabled" = true ]; then
+        user_systemctl enable "$APP_UNIT" >/dev/null 2>&1 || true
+    fi
+    if [ "$was_active" = true ]; then
+        user_systemctl start "$APP_UNIT" >/dev/null 2>&1 || true
+    fi
+done
+
+exit 0

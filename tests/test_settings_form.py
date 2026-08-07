@@ -1,0 +1,389 @@
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from mwb_linux.config import (
+    HOTKEY_DEFAULTS,
+    OTHER_OPTION_DEFAULTS,
+    Config,
+    generate_secret,
+    host_after_name_edit,
+    parse_ip_mappings,
+)
+from mwb_linux.shortcuts import BASE, desired_bindings, managed_paths, merge_paths
+from mwb_linux.ui import (
+    STATUS_TIMEOUT,
+    MainWindow,
+    MouseWithoutBordersApplication,
+    _start_background_service,
+    adjacent_remote_edges,
+    matrix_coordinates,
+    remote_records,
+)
+
+
+class SettingsFormConfigTests(unittest.TestCase):
+    def test_legacy_single_host_migrates_to_four_machine_matrix(self):
+        config = Config(
+            host="10.0.0.7",
+            host_name="WindowsPC",
+            machine_name="LinuxPC",
+            machine_id=10,
+        )
+
+        self.assertEqual(config.machine_matrix, ["LinuxPC", "WindowsPC", "", ""])
+        self.assertEqual(
+            [(target.name, target.address) for target in config.resolve_hosts()],
+            [("WindowsPC", "10.0.0.7")],
+        )
+
+    def test_three_remote_computers_round_trip_in_matrix_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            config = Config(
+                machine_name="LinuxPC",
+                machine_id=10,
+                secret="0123456789abcdef",
+                remote_machines=[
+                    {"name": "LeftPC", "address": "10.0.0.1"},
+                    {"name": "RightPC", "address": "10.0.0.2"},
+                    {"name": "BottomPC", "address": "10.0.0.3"},
+                ],
+                machine_matrix=["LeftPC", "LinuxPC", "RightPC", "BottomPC"],
+            )
+
+            config.validate(require_connection=True)
+            config.save(path)
+            reloaded = Config.load(path)
+
+            self.assertEqual(reloaded.machine_matrix, config.machine_matrix)
+            self.assertEqual(
+                [target.name for target in reloaded.resolve_hosts()],
+                ["LeftPC", "RightPC", "BottomPC"],
+            )
+
+    def test_matrix_rejects_duplicate_and_fourth_remote_computers(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            Config(
+                machine_name="LinuxPC",
+                machine_id=10,
+                remote_machines=[{"name": "WindowsPC", "address": "10.0.0.1"}],
+                machine_matrix=["LinuxPC", "WindowsPC", "windowspc", ""],
+            ).validate()
+
+    def test_explicit_matrix_does_not_readd_a_removed_remote_record(self):
+        config = Config(
+            machine_name="LinuxPC",
+            machine_id=10,
+            remote_machines=[
+                {"name": "KeptPC", "address": "10.0.0.1"},
+                {"name": "RemovedPC", "address": "10.0.0.2"},
+            ],
+            machine_matrix=["LinuxPC", "KeptPC", "", ""],
+        )
+
+        self.assertEqual(config.machine_matrix, ["LinuxPC", "KeptPC", "", ""])
+        self.assertEqual([target.name for target in config.resolve_hosts()], ["KeptPC"])
+
+        with self.assertRaisesRegex(ValueError, "at most three"):
+            Config(
+                machine_name="LinuxPC",
+                machine_id=10,
+                remote_machines=[
+                    {"name": f"Windows{index}", "address": f"10.0.0.{index}"}
+                    for index in range(1, 5)
+                ],
+            ).validate()
+
+    def test_ip_mappings_round_trip_and_reject_bad_lines(self):
+        text = "# comment\nSampleA 192.168.1.5\n\nSampleB 192.168.1.6\n"
+        self.assertEqual(
+            parse_ip_mappings(text),
+            {"samplea": "192.168.1.5", "sampleb": "192.168.1.6"},
+        )
+        with self.assertRaises(ValueError) as error:
+            parse_ip_mappings("SampleA not-an-ip")
+        self.assertIn("line 1", str(error.exception))
+        with self.assertRaises(ValueError):
+            parse_ip_mappings("SampleA")
+
+    def test_mapping_wins_over_dns_for_the_host_name(self):
+        config = Config(
+            host="WindowsPC",
+            host_name="WindowsPC",
+            ip_mappings="WindowsPC 10.0.0.7",
+        )
+        self.assertEqual(config.resolve_host(), "10.0.0.7")
+        config.ip_mappings = ""
+        self.assertEqual(config.resolve_host(), "WindowsPC")
+
+    def test_editing_the_machine_card_keeps_an_explicit_address(self):
+        self.assertEqual(host_after_name_edit("10.0.0.7", "WindowsPC", "WindowsPC"), "10.0.0.7")
+        self.assertEqual(host_after_name_edit("10.0.0.7", "WindowsPC", "OtherPC"), "OtherPC")
+
+    def test_generated_key_matches_the_windows_form_shape(self):
+        key = generate_secret()
+        self.assertEqual(len(key), 16)
+        self.assertNotEqual(key, generate_secret())
+
+    def test_form_settings_survive_a_save_and_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            config = Config(
+                secret="0123456789abcdef",
+                host="pc",
+                two_row=True,
+                host_zone=[1920, 0, 2560, 1440],
+                switch_hotkey="numbers",
+                other_options={"wrap_mouse": True},
+                hotkeys={"reconnect": "R"},
+                ip_mappings="pc 10.0.0.7",
+            )
+            config.save(path)
+            reloaded = Config.load(path)
+            self.assertTrue(reloaded.two_row)
+            self.assertEqual(reloaded.host_zone, [1920, 0, 2560, 1440])
+            self.assertEqual(reloaded.switch_hotkey, "numbers")
+            self.assertTrue(reloaded.other_options["wrap_mouse"])
+            # Missing entries fall back to the documented defaults.
+            self.assertEqual(
+                reloaded.other_options["disable_cad"], OTHER_OPTION_DEFAULTS["disable_cad"]
+            )
+            self.assertEqual(reloaded.hotkeys["exit"], HOTKEY_DEFAULTS["exit"])
+
+    def test_invalid_form_values_are_rejected(self):
+        with self.assertRaises(ValueError):
+            Config(switch_hotkey="always").validate()
+        with self.assertRaises(ValueError):
+            Config(hotkeys={"exit": "Ctrl"}).validate()
+        with self.assertRaises(ValueError):
+            Config(other_options={"fly_mouse": True}).validate()
+        with self.assertRaises(ValueError):
+            Config(host_zone=[0, 0]).validate()
+
+    def test_four_computer_matrix_uses_windows_slot_coordinates(self):
+        self.assertEqual(
+            [matrix_coordinates(slot, False) for slot in range(4)],
+            [(0, 0), (0, 1), (0, 2), (0, 3)],
+        )
+        self.assertEqual(
+            [matrix_coordinates(slot, True) for slot in range(4)],
+            [(0, 0), (0, 1), (1, 0), (1, 1)],
+        )
+
+    def test_unchanged_remote_keeps_its_explicit_address(self):
+        records = remote_records(
+            ["linux", "WindowsA", "WindowsB", ""],
+            "linux",
+            {"windowsa": "10.0.0.7"},
+        )
+        self.assertEqual(
+            records,
+            [
+                {"name": "WindowsA", "address": "10.0.0.7"},
+                {"name": "WindowsB", "address": "WindowsB"},
+            ],
+        )
+
+    def test_matrix_edges_follow_one_row_and_two_row_topology(self):
+        self.assertEqual(
+            adjacent_remote_edges(["A", "linux", "", "B"], "linux", False),
+            {"right": "B", "left": "A"},
+        )
+        self.assertEqual(
+            adjacent_remote_edges(["linux", "A", "B", ""], "linux", True),
+            {"right": "A", "bottom": "B"},
+        )
+
+    def test_enabling_removing_and_swapping_computer_slots(self):
+        form = SimpleNamespace(
+            config=Config(machine_name="linux", machine_id=10),
+            _matrix_names=["linux", "", "", ""],
+            _enabled_slots={0},
+            machine_cards={},
+            _remember_matrix_names=lambda: None,
+            _render_matrix=Mock(),
+        )
+
+        MainWindow._set_slot_enabled(form, 1, True)
+        self.assertEqual(form._enabled_slots, {0, 1})
+        form._matrix_names[1] = "WindowsA"
+        MainWindow._swap_slots(form, 0, 1)
+        self.assertEqual(form._matrix_names, ["WindowsA", "linux", "", ""])
+        self.assertEqual(form._enabled_slots, {0, 1})
+
+        MainWindow._set_slot_enabled(form, 0, False)
+        self.assertEqual(form._matrix_names, ["", "linux", "", ""])
+        self.assertEqual(form._enabled_slots, {1})
+
+
+class BackgroundServiceTests(unittest.TestCase):
+    def test_closing_the_window_hides_it_without_destroying_the_application(self):
+        form = SimpleNamespace(set_visible=Mock())
+
+        handled = MainWindow._on_close_request(form, form)
+
+        self.assertTrue(handled)
+        form.set_visible.assert_called_once_with(False)
+
+    def test_indicator_open_and_settings_actions_present_the_existing_window(self):
+        window = SimpleNamespace(present=Mock(), show_settings=Mock())
+        application = SimpleNamespace(window=window)
+
+        MouseWithoutBordersApplication.open_window(application)
+        MouseWithoutBordersApplication.open_settings(application)
+
+        window.present.assert_called_once_with()
+        window.show_settings.assert_called_once_with()
+
+    def test_indicator_exit_stops_service_releases_hold_and_quits(self):
+        application = SimpleNamespace(
+            indicator=SimpleNamespace(stop=Mock()),
+            _held_for_indicator=True,
+            release=Mock(),
+            quit=Mock(),
+        )
+        with patch("mwb_linux.ui.control_request", return_value={"ok": True}) as request:
+            MouseWithoutBordersApplication.exit_application(application)
+
+        request.assert_called_once_with("quit", timeout=STATUS_TIMEOUT)
+        application.indicator.stop.assert_called_once_with()
+        application.release.assert_called_once_with()
+        application.quit.assert_called_once_with()
+        self.assertFalse(application._held_for_indicator)
+
+    def test_installed_ui_starts_the_canonical_app_unit(self):
+        with (
+            patch(
+                "mwb_linux.ui.__file__",
+                "/usr/lib/powertoys-mouse-without-borders/mwb_linux/ui.py",
+            ),
+            patch("mwb_linux.ui.Path.is_file", return_value=True),
+            patch(
+                "mwb_linux.ui.subprocess.run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run,
+        ):
+            _start_background_service()
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "systemctl",
+                "--user",
+                "start",
+                "app-io.github.NaveDanan.MouseWithoutBorders.service",
+            ],
+        )
+
+    def test_source_daemon_uses_its_own_desktop_scope(self):
+        launched_environment = {
+            "PATH": "/usr/bin",
+            "GIO_LAUNCHED_DESKTOP_FILE": "com.t3tools.t3code.desktop",
+            "GIO_LAUNCHED_DESKTOP_FILE_PID": "123",
+            "XDG_ACTIVATION_TOKEN": "ide-token",
+        }
+        with (
+            patch.dict(
+                "mwb_linux.ui.os.environ", launched_environment, clear=True
+            ),
+            patch(
+                "mwb_linux.ui.subprocess.run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run,
+            patch("mwb_linux.ui.subprocess.Popen") as popen,
+        ):
+            _start_background_service()
+
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:4], ["systemd-run", "--user", "--quiet", "--collect"])
+        self.assertIn(
+            "--unit=app-io.github.NaveDanan.MouseWithoutBorders@dev.service",
+            arguments,
+        )
+        self.assertTrue(
+            any(argument.startswith("--setenv=PYTHONPATH=") for argument in arguments)
+        )
+        child_environment = run.call_args.kwargs["env"]
+        self.assertNotIn("GIO_LAUNCHED_DESKTOP_FILE", child_environment)
+        self.assertNotIn("GIO_LAUNCHED_DESKTOP_FILE_PID", child_environment)
+        self.assertNotIn("XDG_ACTIVATION_TOKEN", child_environment)
+        popen.assert_not_called()
+
+    def test_source_daemon_fails_closed_when_systemd_is_unavailable(self):
+        with (
+            patch(
+                "mwb_linux.ui.subprocess.run",
+                return_value=SimpleNamespace(returncode=1),
+            ),
+            patch("mwb_linux.ui.subprocess.Popen") as popen,
+        ):
+            with self.assertRaisesRegex(OSError, "systemd"):
+                _start_background_service()
+
+        popen.assert_not_called()
+
+
+class DesktopShortcutTests(unittest.TestCase):
+    def test_switch_mode_selects_the_accelerators(self):
+        config = Config(
+            machine_name="LinuxPC",
+            remote_machines=[
+                {"name": "LeftPC", "address": "10.0.0.1"},
+                {"name": "RightPC", "address": "10.0.0.2"},
+            ],
+            machine_matrix=["LeftPC", "LinuxPC", "RightPC", ""],
+            switch_hotkey="numbers",
+        )
+        bindings = desired_bindings(config)
+        for slot in range(1, 5):
+            binding = bindings[f"{BASE}powertoys-mwb-machine-{slot}/"]
+            self.assertEqual(binding[1], f"powertoys-mouse-without-borders switch-machine {slot}")
+            self.assertEqual(binding[2], f"<Control><Alt>{slot}")
+        self.assertNotIn(f"{BASE}powertoys-mwb-local/", bindings)
+        self.assertNotIn(f"{BASE}powertoys-mwb-host/", bindings)
+
+    def test_function_key_mode_registers_all_four_matrix_slots(self):
+        bindings = desired_bindings(Config(switch_hotkey="fkeys"))
+        self.assertEqual(
+            [bindings[f"{BASE}powertoys-mwb-machine-{slot}/"][2] for slot in range(1, 5)],
+            [f"<Control><Alt>F{slot}" for slot in range(1, 5)],
+        )
+
+    def test_disabled_switching_removes_the_machine_bindings(self):
+        bindings = desired_bindings(Config(switch_hotkey="disabled"))
+        for slot in range(1, 5):
+            self.assertNotIn(f"{BASE}powertoys-mwb-machine-{slot}/", bindings)
+        self.assertIn(f"{BASE}powertoys-mwb-reconnect/", bindings)
+
+    def test_disabled_hotkeys_are_not_registered(self):
+        config = Config(hotkeys={"reconnect": "Disable", "settings": "Disable", "exit": "Disable"})
+        self.assertEqual(desired_bindings(config), {})
+
+    def test_merging_keeps_unrelated_bindings_and_drops_retired_ones(self):
+        current = [
+            "/custom/terminal/",
+            f"{BASE}powertoys-mwb-local/",
+            f"{BASE}powertoys-mwb-host/",
+            f"{BASE}powertoys-mwb-machine-4/",
+        ]
+        wanted = {
+            f"{BASE}powertoys-mwb-machine-1/": (),
+            f"{BASE}powertoys-mwb-reconnect/": (),
+        }
+        self.assertEqual(
+            merge_paths(current, wanted),
+            [
+                "/custom/terminal/",
+                f"{BASE}powertoys-mwb-machine-1/",
+                f"{BASE}powertoys-mwb-reconnect/",
+            ],
+        )
+        self.assertIn(f"{BASE}powertoys-mwb-local/", managed_paths())
+        self.assertIn(f"{BASE}powertoys-mwb-host/", managed_paths())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-cryptography \
+            xclip wl-clipboard xdg-desktop-portal xdg-desktop-portal-gnome \
+            dbus-user-session xdotool
+
+      - name: Run Python tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Test portal bridge
+        run: cargo test --manifest-path portal-bridge/Cargo.toml --locked
+
+      - name: Lint portal bridge
+        run: cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- -D warnings
+
+      - name: Build Debian package
+        run: ./packaging/build-deb.sh
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: powertoys-mouse-without-borders-amd64
+          path: dist/*.deb

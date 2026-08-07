@@ -1,0 +1,680 @@
+"""Portal bridge integration and Windows/Linux input translation."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+import subprocess
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+from .config import Config
+from .keymap import evdev_to_windows, windows_to_evdev
+from .protocol import Packet, PackageType
+from .topology import direction_to, neighbour
+
+LOGGER = logging.getLogger(__name__)
+WINDOWS_EPOCH_TICKS = 621_355_968_000_000_000
+
+WM_MOUSEMOVE = 0x200
+WM_LBUTTONDOWN = 0x201
+WM_LBUTTONUP = 0x202
+WM_RBUTTONDOWN = 0x204
+WM_RBUTTONUP = 0x205
+WM_MBUTTONDOWN = 0x207
+WM_MBUTTONUP = 0x208
+WM_MOUSEWHEEL = 0x20A
+WM_XBUTTONDOWN = 0x20B
+WM_XBUTTONUP = 0x20C
+WM_MOUSEHWHEEL = 0x20E
+
+BUTTON_TO_WM = {
+    (272, True): WM_LBUTTONDOWN,
+    (272, False): WM_LBUTTONUP,
+    (273, True): WM_RBUTTONDOWN,
+    (273, False): WM_RBUTTONUP,
+    (274, True): WM_MBUTTONDOWN,
+    (274, False): WM_MBUTTONUP,
+    (275, True): WM_XBUTTONDOWN,
+    (275, False): WM_XBUTTONUP,
+    (276, True): WM_XBUTTONDOWN,
+    (276, False): WM_XBUTTONUP,
+}
+
+
+def _mwb_to_eis_coordinate(value: int, origin: float, extent: float) -> float:
+    """Decode one MWB absolute axis into a valid EIS region coordinate.
+
+    The Windows sender quantizes a pixel coordinate with ``pixel * 65535 /
+    screen_extent`` using integer division.  A plain floating-point inverse is
+    therefore just below the original pixel for almost every nonzero value
+    (for example, row 1079 becomes 1078.995 on a 1080-row display).  Round the
+    inverse to the nearest pixel to recover the sender's quantization without
+    shifting ordinary midpoint values, then clamp it to the half-open EIS
+    region so the 65535 endpoint never becomes the out-of-bounds ``origin +
+    extent``.
+    """
+
+    region_origin = int(origin)
+    region_extent = max(1, int(extent))
+    normalized = max(0, min(65535, int(value)))
+    pixel = (normalized * region_extent + 32767) // 65535
+    return float(region_origin + min(region_extent - 1, pixel))
+
+
+def capture_targets(config: Config) -> list[dict[str, object]]:
+    """Return each remote directly reachable from the local matrix tile."""
+
+    targets: list[dict[str, object]] = []
+    for edge in ("left", "right", "top", "bottom"):
+        machine_name = neighbour(
+            config.machine_matrix,
+            config.two_row,
+            config.machine_name,
+            edge,
+            wrap=bool(config.other_options.get("wrap_mouse")),
+        )
+        if not machine_name or machine_name.casefold() == config.machine_name.casefold():
+            continue
+        target: dict[str, object] = {"edge": edge, "target": machine_name}
+        if edge == config.host_position and config.host_zone:
+            target["zone"] = list(config.host_zone)
+        targets.append(target)
+    return targets
+
+
+def find_bridge() -> str | None:
+    override = os.environ.get("MWB_PORTAL_BRIDGE")
+    module_root = Path(__file__).resolve().parents[1]
+    installed_root = Path("/usr/lib/powertoys-mouse-without-borders")
+    installed = str(installed_root / "mwb-portal-bridge")
+    source = [
+        str(module_root / "portal-bridge" / "target" / "release" / "mwb-portal-bridge"),
+        str(module_root / "portal-bridge" / "target" / "debug" / "mwb-portal-bridge"),
+    ]
+    # A source daemon must exercise the source bridge instead of silently
+    # falling back to an older system package. Installed modules keep using
+    # their co-packaged helper.
+    packaged = module_root.is_relative_to(installed_root)
+    preferred = [installed, *source] if packaged else [*source, installed]
+    candidates = [
+        override,
+        *preferred,
+        shutil.which("mwb-portal-bridge"),
+    ]
+    return next((candidate for candidate in candidates if candidate and os.access(candidate, os.X_OK)), None)
+
+
+def portal_environment() -> dict[str, str]:
+    """Identify the helper as Mouse Without Borders to desktop portals."""
+
+    environment = os.environ.copy()
+    module_root = Path(__file__).resolve().parents[1]
+    installed_root = Path("/usr/lib/powertoys-mouse-without-borders")
+    if module_root.is_relative_to(installed_root):
+        desktop_file = Path(
+            "/usr/share/applications/io.github.NaveDanan.MouseWithoutBorders.desktop"
+        )
+    else:
+        desktop_file = (
+            module_root
+            / "resources"
+            / "io.github.NaveDanan.MouseWithoutBorders.desktop"
+        )
+    if desktop_file.is_file():
+        environment["GIO_LAUNCHED_DESKTOP_FILE"] = str(desktop_file)
+        environment["GIO_LAUNCHED_DESKTOP_FILE_PID"] = str(os.getpid())
+    return environment
+
+
+class PortalBridge:
+    """Newline-delimited JSON client for the rootless Rust portal helper."""
+
+    def __init__(self, event_callback: Callable[[dict], None]) -> None:
+        self.event_callback = event_callback
+        self.process: subprocess.Popen[str] | None = None
+        self._write_lock = threading.Lock()
+
+    def start(
+        self,
+        edge: str,
+        capture_restore_token: str = "",
+        inject_restore_token: str = "",
+        *,
+        enable_capture: bool = True,
+        zone: list[int] | None = None,
+        targets: list[dict[str, object]] | None = None,
+    ) -> None:
+        executable = find_bridge()
+        if not executable:
+            raise FileNotFoundError("mwb-portal-bridge is not built or installed")
+        self.process = subprocess.Popen(
+            [executable],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=portal_environment(),
+            text=True,
+            bufsize=1,
+        )
+        threading.Thread(target=self._read_loop, name="mwb-portal-events", daemon=True).start()
+        threading.Thread(target=self._stderr_loop, name="mwb-portal-log", daemon=True).start()
+        if enable_capture:
+            self.command(
+                "capture_init",
+                id="capture",
+                edge=edge,
+                restore_token=capture_restore_token or None,
+                # Restricts the pointer barrier to the monitor the settings
+                # matrix places the Windows host against.
+                zone=list(zone) if zone else None,
+                targets=targets or None,
+            )
+        self.command(
+            "inject_init",
+            id="inject",
+            restore_token=inject_restore_token or None,
+        )
+
+    def _read_loop(self) -> None:
+        assert self.process and self.process.stdout
+        for line in self.process.stdout:
+            try:
+                self.event_callback(json.loads(line))
+            except (json.JSONDecodeError, TypeError) as exc:
+                LOGGER.warning("invalid portal bridge response: %s", exc)
+
+    def _stderr_loop(self) -> None:
+        assert self.process and self.process.stderr
+        for line in self.process.stderr:
+            LOGGER.debug("portal: %s", line.rstrip())
+
+    def command(self, command: str, **arguments: object) -> None:
+        if not self.process or self.process.poll() is not None or not self.process.stdin:
+            raise ConnectionError("portal bridge is not running")
+        message = json.dumps({"command": command, **arguments}, separators=(",", ":"))
+        with self._write_lock:
+            self.process.stdin.write(message + "\n")
+            self.process.stdin.flush()
+
+    def stop(self) -> None:
+        if not self.process:
+            return
+        try:
+            self.command("shutdown")
+            self.process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired, ConnectionError):
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=3)
+        self.process = None
+
+
+class InputManager:
+    """Translate portal events to MWB packets and remote packets to EIS."""
+
+    def __init__(
+        self,
+        config: Config,
+        send_packet: Callable[[Packet], None],
+        peer_id: Callable[..., int | None],
+        status_callback: Callable[[str], None],
+        persist_config: Callable[[], None] | None = None,
+        bridge: PortalBridge | None = None,
+    ) -> None:
+        self.config = config
+        self.send_packet = send_packet
+        self._peer_lookup = peer_id
+        self.status_callback = status_callback
+        self.persist_config = persist_config or (lambda: None)
+        self.bridge = bridge or PortalBridge(self._bridge_event)
+        self.remote_active = False
+        self.width = 1920
+        self.height = 1080
+        self.x = 0
+        self.y = 32768
+        self.inject_x = 0.0
+        self.inject_y = 0.0
+        self.inject_width = float(self.width)
+        self.inject_height = float(self.height)
+        self.inject_regions: list[tuple[int, int, int, int]] = []
+        self._keys_down: set[int] = set()
+        self._started = False
+        self._pending_remote_name = ""
+        adjacent = neighbour(
+            self.config.machine_matrix,
+            self.config.two_row,
+            self.config.machine_name,
+            self.config.host_position,
+            wrap=bool(self.config.other_options.get("wrap_mouse")),
+        )
+        self.active_remote_name = adjacent or next(
+            (target.name for target in self.config.resolve_hosts()), ""
+        )
+
+    def _peer_id(self, machine_name: str | None = None) -> int | None:
+        """Look up one peer while accepting legacy no-argument test adapters."""
+
+        try:
+            return self._peer_lookup(machine_name)
+        except TypeError:
+            return self._peer_lookup()
+
+    def start(self) -> None:
+        if self._started:
+            return
+        try:
+            self.bridge.start(
+                self.config.host_position,
+                self.config.capture_restore_token,
+                self.config.inject_restore_token,
+                enable_capture=self.config.edge_switching,
+                zone=self.config.host_zone or None,
+                targets=capture_targets(self.config),
+            )
+            self._started = True
+            self.status_callback("Portal permission requested")
+        except (FileNotFoundError, OSError, ConnectionError) as exc:
+            self._started = False
+            self.status_callback(f"Input unavailable: {exc}")
+            LOGGER.warning("input portal unavailable: %s", exc)
+
+    def stop(self) -> None:
+        self.release_local()
+        self.bridge.stop()
+        self._started = False
+
+    def switch_remote(self, machine_name: str | None = None) -> None:
+        if machine_name:
+            self._pending_remote_name = ""
+            if machine_name.casefold() == self.config.machine_name.casefold():
+                self.release_local()
+                return
+            if not self._peer_id(machine_name):
+                self.status_callback(f"Cannot switch: {machine_name} is not connected")
+                return
+            if self.remote_active:
+                if machine_name.casefold() == self.active_remote_name.casefold():
+                    self.status_callback(f"Already controlling {machine_name}")
+                    return
+                self._switch_active_target(machine_name)
+                return
+            self.active_remote_name = machine_name
+            entry = self._first_matrix_hop(machine_name)
+            if entry and entry.casefold() != machine_name.casefold():
+                # The compositor can only activate a barrier adjacent to the
+                # local tile. Remember the shortcut's exact destination while
+                # capture enters through the first reachable matrix hop.
+                self._pending_remote_name = machine_name
+        peer = self._peer_id(self.active_remote_name)
+        if not peer:
+            self.status_callback("Cannot switch: no connected host")
+            return
+        if not self.config.edge_switching:
+            self.status_callback("Enable screen-edge switching first")
+            return
+        if not self.remote_active and self._trigger_edge():
+            self.status_callback("Activating host input capture")
+            return
+        self.status_callback("Move the pointer through the configured screen edge")
+
+    def _activate_remote(self, machine_name: str = "", edge: str = "") -> None:
+        if self.remote_active:
+            return
+        if self._pending_remote_name:
+            machine_name = self._pending_remote_name
+            self._pending_remote_name = ""
+        if machine_name:
+            self.active_remote_name = machine_name
+        if not self._peer_id(self.active_remote_name):
+            # The portal may remain authorized while the network is manually
+            # disconnected so GNOME 46 does not prompt again on every Connect.
+            # If the pointer still crosses its barrier, release it immediately.
+            try:
+                self.bridge.command("capture_release")
+            except ConnectionError:
+                pass
+            self.status_callback("Cannot switch: no connected host")
+            return
+        self.remote_active = True
+        edge = edge or direction_to(
+            self.config.machine_matrix,
+            self.config.two_row,
+            self.config.machine_name,
+            self.active_remote_name,
+        ) or self.config.host_position
+        self.x = 32768
+        self.y = 32768
+        if edge == "right":
+            self.x = 800
+        elif edge == "left":
+            self.x = 65535 - 800
+        elif edge == "bottom":
+            self.y = 800
+        else:
+            self.y = 65535 - 800
+        # Capture is activated by crossing the compositor-owned barrier. There
+        # is intentionally no portal API that force-grabs global input.
+        self.status_callback(f"Controlling {self.active_remote_name}")
+
+    def _trigger_edge(self) -> bool:
+        """Use XWayland pointer warping when available to trigger the portal barrier."""
+
+        executable = shutil.which("xdotool")
+        if not executable:
+            return False
+        try:
+            location = subprocess.check_output(
+                [executable, "getmouselocation", "--shell"], text=True, timeout=2
+            )
+            values = dict(
+                line.split("=", 1) for line in location.splitlines() if "=" in line
+            )
+            x = int(values.get("X", self.width // 2))
+            y = int(values.get("Y", self.height // 2))
+            requested = self._pending_remote_name or self.active_remote_name
+            entry = self._first_matrix_hop(requested) or requested
+            edge = direction_to(
+                self.config.machine_matrix,
+                self.config.two_row,
+                self.config.machine_name,
+                entry,
+            ) or self.config.host_position
+            targets = {
+                "right": (self.width - 2, y, 8, 0),
+                "left": (1, y, -8, 0),
+                "bottom": (x, self.height - 2, 0, 8),
+                "top": (x, 1, 0, -8),
+            }
+            target_x, target_y, relative_x, relative_y = targets[edge]
+            subprocess.run(
+                [executable, "mousemove", str(target_x), str(target_y)],
+                check=True,
+                timeout=2,
+            )
+            subprocess.run(
+                [
+                    executable,
+                    "mousemove_relative",
+                    "--",
+                    str(relative_x),
+                    str(relative_y),
+                ],
+                check=True,
+                timeout=2,
+            )
+            return True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+
+    def _first_matrix_hop(self, destination: str) -> str:
+        """Return the local-adjacent tile on a route to ``destination``."""
+
+        source = self.config.machine_name
+        queue: list[tuple[str, str]] = [(source, "")]
+        visited = {source.casefold()}
+        while queue:
+            current, first = queue.pop(0)
+            for direction in ("left", "right", "top", "bottom"):
+                candidate = neighbour(
+                    self.config.machine_matrix,
+                    self.config.two_row,
+                    current,
+                    direction,
+                    wrap=bool(self.config.other_options.get("wrap_mouse")),
+                )
+                key = candidate.casefold()
+                if not candidate or key in visited:
+                    continue
+                first_hop = first or candidate
+                if key == destination.casefold():
+                    return first_hop
+                visited.add(key)
+                queue.append((candidate, first_hop))
+        return ""
+
+    def release_local(self) -> None:
+        self._pending_remote_name = ""
+        if not self.remote_active:
+            return
+        self.remote_active = False
+        for code in list(self._keys_down):
+            self._send_key(code, False)
+        self._keys_down.clear()
+        try:
+            self.bridge.command("capture_release")
+        except ConnectionError:
+            pass
+        self.status_callback("Controlling this computer")
+
+    def _bridge_event(self, event: dict) -> None:
+        if event.get("type") == "response":
+            if not event.get("ok"):
+                self.status_callback(f"Input portal error: {event.get('error', 'unknown')}")
+                return
+            if event.get("id") == "capture":
+                result = event.get("result", {})
+                token = result.get("restore_token")
+                if token:
+                    self.config.capture_restore_token = token
+                    self.persist_config()
+                zones = result.get("zones", [])
+                if zones:
+                    left = min(int(zone.get("x", 0)) for zone in zones)
+                    top = min(int(zone.get("y", 0)) for zone in zones)
+                    right = max(int(zone.get("x", 0)) + int(zone.get("width", 0)) for zone in zones)
+                    bottom = max(int(zone.get("y", 0)) + int(zone.get("height", 0)) for zone in zones)
+                    self.width = max(1, right - left)
+                    self.height = max(1, bottom - top)
+                self.status_callback("Screen-edge capture ready")
+            elif event.get("id") == "inject":
+                token = event.get("result", {}).get("restore_token")
+                if token:
+                    self.config.inject_restore_token = token
+                    self.persist_config()
+                self.status_callback("Remote input permission ready")
+            return
+        event_type = event.get("event")
+        if event_type == "capture_activated":
+            self._activate_remote(
+                str(event.get("target", "")), str(event.get("edge", ""))
+            )
+        elif event_type in ("capture_deactivated", "capture_disabled"):
+            self.release_local()
+        elif event_type == "key" and self.remote_active:
+            code = int(event["keycode"])
+            pressed = event["state"] == "pressed"
+            if pressed:
+                self._keys_down.add(code)
+            else:
+                self._keys_down.discard(code)
+            # Ctrl+Alt+Esc is the always-available panic return while captured.
+            if pressed and code == 1 and {29, 56}.issubset(self._keys_down):
+                self.release_local()
+                return
+            self._send_key(code, pressed)
+        elif event_type == "pointer_motion" and self.remote_active:
+            self._send_motion(float(event.get("dx", 0)), float(event.get("dy", 0)))
+        elif event_type == "button" and self.remote_active:
+            self._send_button(int(event["button"]), event["state"] == "pressed")
+        elif event_type == "scroll" and self.remote_active:
+            self._send_scroll(
+                float(event.get("dx", 0)),
+                float(event.get("dy", 0)),
+                discrete=bool(event.get("discrete")),
+            )
+        elif event_type == "inject_device_added" and event.get("pointer_absolute"):
+            regions = event.get("regions", [])
+            for region in regions:
+                parsed = (
+                    int(region.get("x", 0)),
+                    int(region.get("y", 0)),
+                    int(region.get("width", 0)),
+                    int(region.get("height", 0)),
+                )
+                if parsed[2] > 0 and parsed[3] > 0 and parsed not in self.inject_regions:
+                    self.inject_regions.append(parsed)
+            if self.inject_regions:
+                left = min(region[0] for region in self.inject_regions)
+                top = min(region[1] for region in self.inject_regions)
+                right = max(region[0] + region[2] for region in self.inject_regions)
+                bottom = max(region[1] + region[3] for region in self.inject_regions)
+                self.inject_x = float(left)
+                self.inject_y = float(top)
+                self.inject_width = float(right - left)
+                self.inject_height = float(bottom - top)
+        elif event_type and event_type.endswith("_error"):
+            self.status_callback(f"Input portal error: {event.get('error', 'unknown')}")
+
+    def _send_key(self, code: int, pressed: bool) -> None:
+        mapped = evdev_to_windows(code, pressed)
+        peer = self._peer_id(self.active_remote_name)
+        if not mapped or not peer:
+            return
+        packet = Packet()
+        packet.type = PackageType.KEYBOARD
+        packet.dest = peer
+        packet.timestamp = WINDOWS_EPOCH_TICKS + int(time.time() * 10_000_000)
+        packet.keyboard = mapped
+        self.send_packet(packet)
+
+    def _send_motion(self, dx: float, dy: float) -> None:
+        peer = self._peer_id(self.active_remote_name)
+        if not peer:
+            return
+        self.x += int(dx * 65535 / max(self.width, 1))
+        self.y += int(dy * 65535 / max(self.height, 1))
+        crossed = self._crossed_edge()
+        if crossed:
+            self._handle_edge_crossing(crossed)
+            return
+        self.x = max(0, min(65535, self.x))
+        self.y = max(0, min(65535, self.y))
+        self._send_mouse(WM_MOUSEMOVE, 0)
+
+    def _crossed_edge(self) -> str:
+        if self.x <= 0:
+            return "left"
+        if self.x >= 65535:
+            return "right"
+        if self.y <= 0:
+            return "top"
+        if self.y >= 65535:
+            return "bottom"
+        return ""
+
+    def _handle_edge_crossing(self, edge: str) -> None:
+        destination = neighbour(
+            self.config.machine_matrix,
+            self.config.two_row,
+            self.active_remote_name,
+            edge,
+            wrap=bool(self.config.other_options.get("wrap_mouse")),
+        )
+        if destination.casefold() == self.config.machine_name.casefold():
+            self.release_local()
+            return
+        if destination and self._peer_id(destination):
+            self._switch_active_target(destination, edge=edge)
+            return
+        # No connected neighbour occupies this edge, so keep the pointer on
+        # the active remote instead of accidentally returning to Linux.
+        self.x = max(0, min(65535, self.x))
+        self.y = max(0, min(65535, self.y))
+        self._send_mouse(WM_MOUSEMOVE, 0)
+
+    def _switch_active_target(self, machine_name: str, *, edge: str = "") -> None:
+        previous_id = self._peer_id(self.active_remote_name)
+        if previous_id:
+            hide = Packet()
+            hide.type = PackageType.HIDE_MOUSE
+            hide.dest = previous_id
+            self.send_packet(hide)
+        self.active_remote_name = machine_name
+        if edge == "right":
+            self.x = 800
+        elif edge == "left":
+            self.x = 65535 - 800
+        elif edge == "bottom":
+            self.y = 800
+        elif edge == "top":
+            self.y = 65535 - 800
+        else:
+            self.x = self.y = 32768
+        self._send_mouse(WM_MOUSEMOVE, 0)
+        self.status_callback(f"Controlling {machine_name}")
+
+    def _send_button(self, code: int, pressed: bool) -> None:
+        event = BUTTON_TO_WM.get((code, pressed))
+        if event:
+            self._send_mouse(event, 2 if code == 276 else 1 if code == 275 else 0)
+
+    def _send_scroll(self, dx: float, dy: float, *, discrete: bool) -> None:
+        scale = 1 if discrete else 120
+        if dy:
+            self._send_mouse(WM_MOUSEWHEEL, int(-dy * scale))
+        if dx:
+            self._send_mouse(WM_MOUSEHWHEEL, int(dx * scale))
+
+    def _send_mouse(self, event: int, wheel: int) -> None:
+        peer = self._peer_id(self.active_remote_name)
+        if not peer:
+            return
+        packet = Packet()
+        packet.type = PackageType.MOUSE
+        packet.dest = peer
+        packet.mouse = (self.x, self.y, wheel, event)
+        self.send_packet(packet)
+
+    def inject_keyboard(self, vk: int, flags: int) -> None:
+        mapped = windows_to_evdev(vk, flags)
+        if not mapped:
+            LOGGER.debug("unmapped Windows VK: %#x", vk)
+            return
+        code, pressed = mapped
+        try:
+            self.bridge.command(
+                "inject_key",
+                keycode=code,
+                state="pressed" if pressed else "released",
+            )
+        except ConnectionError as exc:
+            LOGGER.warning("keyboard injection unavailable: %s", exc)
+
+    def inject_mouse(self, x: int, y: int, wheel: int, event: int) -> None:
+        try:
+            if event == WM_MOUSEMOVE:
+                self.bridge.command(
+                    "inject_pointer_absolute",
+                    x=_mwb_to_eis_coordinate(x, self.inject_x, self.inject_width),
+                    y=_mwb_to_eis_coordinate(y, self.inject_y, self.inject_height),
+                )
+            elif event in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
+                self.bridge.command(
+                    "inject_scroll",
+                    dx=(wheel if event == WM_MOUSEHWHEEL else 0),
+                    dy=(-wheel if event == WM_MOUSEWHEEL else 0),
+                    discrete=True,
+                )
+            else:
+                if event in (WM_XBUTTONDOWN, WM_XBUTTONUP):
+                    button = (276 if wheel == 2 else 275, event == WM_XBUTTONDOWN)
+                else:
+                    reverse = {value: key for key, value in BUTTON_TO_WM.items()}
+                    button = reverse.get(event)
+                if button:
+                    self.bridge.command(
+                        "inject_button",
+                        button=button[0],
+                        state="pressed" if button[1] else "released",
+                    )
+        except ConnectionError as exc:
+            LOGGER.warning("pointer injection unavailable: %s", exc)
