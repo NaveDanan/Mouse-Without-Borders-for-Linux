@@ -537,6 +537,7 @@ class MouseWithoutBordersService:
             ).start()
 
     def _handle_control_client(self, client: socket.socket) -> None:
+        should_shutdown = False
         try:
             line = client.makefile("rb").readline(MAX_CONTROL_REQUEST_BYTES + 1)
             if len(line) > MAX_CONTROL_REQUEST_BYTES:
@@ -545,12 +546,30 @@ class MouseWithoutBordersService:
             if not isinstance(request, dict):
                 raise ValueError("control request must be a JSON object")
             response = self._control_command(request)
+            should_shutdown = request.get("command") == "quit" and bool(
+                response.get("ok")
+            )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         try:
             client.sendall(json.dumps(response).encode("utf-8") + b"\n")
         finally:
             client.close()
+            # Deliver the acknowledgment before waking the main loop. Without
+            # this ordering, a fast service exit can truncate the reply and
+            # leave the UI unsure whether fail-closed cleanup is still needed.
+            if should_shutdown:
+                self._begin_shutdown()
+
+    def _begin_shutdown(self) -> None:
+        """Schedule guaranteed cleanup after a quit acknowledgment is sent."""
+
+        self._stop.set()
+        threading.Thread(
+            target=self.stop,
+            name="mwb-service-shutdown",
+            daemon=False,
+        ).start()
 
     def _control_command(self, request: dict) -> dict[str, object]:
         command = request.get("command")
@@ -574,7 +593,7 @@ class MouseWithoutBordersService:
         elif command == "save_config":
             self.update_config(request.get("config", {}))
         elif command == "quit":
-            threading.Thread(target=self.stop, daemon=True).start()
+            return {"ok": True}
         elif command == "exit_ui":
             self.exit_ui()
         elif command == "resume_ui":

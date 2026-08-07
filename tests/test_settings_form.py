@@ -241,34 +241,66 @@ class BackgroundServiceTests(unittest.TestCase):
         window.present.assert_called_once_with()
         window.show_settings.assert_called_once_with()
 
-    def test_indicator_exit_stops_sharing_before_quitting_ui(self):
+    def test_status_poll_cannot_restart_service_during_exit(self):
+        application = Mock(spec=MouseWithoutBordersApplication)
+        application._exit_started = True
+        form = SimpleNamespace(get_application=Mock(return_value=application))
+
+        with patch("mwb_linux.ui.control_request") as request:
+            result = MainWindow._poll_status(form)
+
+        request.assert_not_called()
+        self.assertEqual(result, 0)
+
+    def test_indicator_exit_schedules_one_non_blocking_full_shutdown(self):
+        indicator = SimpleNamespace(stop=Mock())
+        window = SimpleNamespace(set_visible=Mock())
         application = SimpleNamespace(
-            indicator=SimpleNamespace(stop=Mock()),
+            indicator=indicator,
+            window=window,
+            _exit_started=False,
             _held_for_indicator=True,
+            _stop_service_and_finish_exit=Mock(),
             release=Mock(),
             quit=Mock(),
         )
-        with patch("mwb_linux.ui.control_request", return_value={"ok": True}) as request:
+        worker = Mock()
+        with patch("mwb_linux.ui.threading.Thread", return_value=worker) as thread:
+            MouseWithoutBordersApplication.exit_application(application)
             MouseWithoutBordersApplication.exit_application(application)
 
-        request.assert_called_once_with("exit_ui")
-        application.indicator.stop.assert_called_once_with()
-        application.release.assert_called_once_with()
-        application.quit.assert_called_once_with()
-        self.assertFalse(application._held_for_indicator)
+        indicator.stop.assert_called_once_with()
+        window.set_visible.assert_called_once_with(False)
+        thread.assert_called_once_with(
+            target=application._stop_service_and_finish_exit,
+            name="mwb-application-exit",
+            daemon=True,
+        )
+        worker.start.assert_called_once_with()
+        application.release.assert_not_called()
+        application.quit.assert_not_called()
+        self.assertTrue(application._exit_started)
+        self.assertIsNone(application.indicator)
+
+    def test_indicator_exit_fully_stops_service_then_finishes_on_gtk_thread(self):
+        application = SimpleNamespace(_finish_exit=Mock())
+        with (
+            patch("mwb_linux.ui.control_request", return_value={"ok": True}) as request,
+            patch("mwb_linux.ui.GLib.idle_add") as idle_add,
+        ):
+            MouseWithoutBordersApplication._stop_service_and_finish_exit(application)
+
+        request.assert_called_once_with("quit", timeout=2.0)
+        idle_add.assert_called_once_with(application._finish_exit)
 
     def test_indicator_exit_fails_closed_when_service_does_not_acknowledge(self):
-        application = SimpleNamespace(
-            indicator=SimpleNamespace(stop=Mock()),
-            _held_for_indicator=True,
-            release=Mock(),
-            quit=Mock(),
-        )
+        application = SimpleNamespace(_finish_exit=Mock())
         with (
             patch("mwb_linux.ui.control_request", side_effect=OSError("gone")),
             patch("mwb_linux.ui.subprocess.run") as run,
+            patch("mwb_linux.ui.GLib.idle_add"),
         ):
-            MouseWithoutBordersApplication.exit_application(application)
+            MouseWithoutBordersApplication._stop_service_and_finish_exit(application)
 
         self.assertEqual(
             run.call_args.args[0],
@@ -277,26 +309,38 @@ class BackgroundServiceTests(unittest.TestCase):
                 "--user",
                 "stop",
                 "app-io.github.NaveDanan.MouseWithoutBorders.service",
+                "app-io.github.NaveDanan.MouseWithoutBorders@dev.service",
             ],
         )
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
 
     def test_indicator_exit_fails_closed_when_an_old_daemon_rejects_command(self):
-        application = SimpleNamespace(
-            indicator=SimpleNamespace(stop=Mock()),
-            _held_for_indicator=True,
-            release=Mock(),
-            quit=Mock(),
-        )
+        application = SimpleNamespace(_finish_exit=Mock())
         with (
             patch(
                 "mwb_linux.ui.control_request",
                 return_value={"ok": False, "error": "unknown command"},
             ),
             patch("mwb_linux.ui.subprocess.run") as run,
+            patch("mwb_linux.ui.GLib.idle_add"),
         ):
-            MouseWithoutBordersApplication.exit_application(application)
+            MouseWithoutBordersApplication._stop_service_and_finish_exit(application)
 
         run.assert_called_once()
+
+    def test_indicator_exit_releases_application_hold_on_gtk_thread(self):
+        application = SimpleNamespace(
+            _held_for_indicator=True,
+            release=Mock(),
+            quit=Mock(),
+        )
+
+        result = MouseWithoutBordersApplication._finish_exit(application)
+
+        application.release.assert_called_once_with()
+        application.quit.assert_called_once_with()
+        self.assertFalse(application._held_for_indicator)
+        self.assertEqual(result, 0)
 
     def test_installed_ui_starts_the_canonical_app_unit(self):
         with (
@@ -356,6 +400,22 @@ class BackgroundServiceTests(unittest.TestCase):
         self.assertNotIn("XDG_ACTIVATION_TOKEN", child_environment)
         popen.assert_not_called()
 
+    def test_appimage_daemon_relaunches_from_the_original_image(self):
+        appimage = "/opt/Mouse-Without-Borders.AppImage"
+        with (
+            patch.dict(
+                "mwb_linux.ui.os.environ", {"APPIMAGE": appimage}, clear=True
+            ),
+            patch("mwb_linux.ui.sys.frozen", True, create=True),
+            patch(
+                "mwb_linux.ui.subprocess.run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run,
+        ):
+            _start_background_service()
+
+        self.assertEqual(run.call_args.args[0][-2:], [appimage, "daemon"])
+
     def test_source_daemon_fails_closed_when_systemd_is_unavailable(self):
         with (
             patch(
@@ -395,6 +455,19 @@ class UpdateUiTests(unittest.TestCase):
         form.update_status.set_text.assert_not_called()
         form.update_refresh.set_sensitive.assert_called_once_with(True)
 
+    def test_non_debian_manual_update_points_to_github_releases(self):
+        form = SimpleNamespace(
+            _update_check_running=False,
+            _installing_update=False,
+            update_status=SimpleNamespace(set_text=Mock()),
+        )
+        with patch("mwb_linux.ui.automatic_install_supported", return_value=False):
+            MainWindow._start_update_check(form, manual=True)
+
+        form.update_status.set_text.assert_called_once_with(
+            "Download updates from GitHub Releases"
+        )
+
     def test_disabling_checks_while_one_is_running_suppresses_its_result(self):
         form = SimpleNamespace(
             _update_check_running=True,
@@ -420,7 +493,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, None, True, True)
 
-        form.update_status.set_text.assert_called_once_with("Up to date (0.5.1)")
+        form.update_status.set_text.assert_called_once_with("Up to date (0.5.2)")
 
     def test_new_version_is_announced_once(self):
         form = SimpleNamespace(
@@ -445,7 +518,7 @@ class UpdateUiTests(unittest.TestCase):
 
         form.present.assert_called_once_with()
         detail = dialog.set_detail.call_args.args[0]
-        self.assertIn("Current version: 0.5.1", detail)
+        self.assertIn("Current version: 0.5.2", detail)
         self.assertIn("Latest version: 0.6.0", detail)
         dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
 

@@ -1,4 +1,6 @@
+import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -11,6 +13,31 @@ from mwb_linux.protocol import Packet, PackageType
 
 
 class ServiceTests(unittest.TestCase):
+    def test_quit_acknowledges_before_scheduling_guaranteed_shutdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            worker = Mock()
+            client, server = socket.socketpair()
+            self.addCleanup(client.close)
+            client.sendall(b'{"command":"quit"}\n')
+
+            with patch("mwb_linux.service.threading.Thread", return_value=worker) as thread:
+                service._handle_control_client(server)
+
+            with client.makefile("rb") as stream:
+                response = json.loads(stream.readline())
+
+            self.assertEqual(response, {"ok": True})
+            self.assertTrue(service._stop.is_set())
+            thread.assert_called_once_with(
+                target=service.stop,
+                name="mwb-service-shutdown",
+                daemon=False,
+            )
+            worker.start.assert_called_once_with()
+
     def test_top_bar_exit_stops_every_sharing_path_and_parks_permission(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"

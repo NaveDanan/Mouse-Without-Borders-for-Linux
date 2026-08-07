@@ -29,6 +29,14 @@ class UpdateError(RuntimeError):
     """An update could not be checked, downloaded, or installed safely."""
 
 
+def automatic_install_supported() -> bool:
+    """Return whether this installation can safely apply a DEB update."""
+
+    return not os.environ.get("APPIMAGE") and all(
+        shutil.which(command) for command in ("apt-get", "dpkg-query")
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class UpdateRelease:
     """A newer stable GitHub release and its architecture-specific package."""
@@ -288,9 +296,14 @@ def schedule_relaunch(command: list[str] | None = None) -> subprocess.Popen[byte
     """Start a detached helper that relaunches after this process has exited."""
 
     executable = shutil.which(PACKAGE_NAME)
-    launch_command = command or (
-        [executable] if executable else [sys.executable, "-m", "mwb_linux"]
-    )
+    if command:
+        launch_command = command
+    elif os.environ.get("APPIMAGE"):
+        launch_command = [os.environ["APPIMAGE"]]
+    else:
+        launch_command = (
+            [executable] if executable else [sys.executable, "-m", "mwb_linux"]
+        )
     waiter = """\
 import os
 import select

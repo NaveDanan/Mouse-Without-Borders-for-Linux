@@ -3,16 +3,19 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LINUX_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-VERSION=${VERSION:-0.5.1}
+VERSION=${VERSION:-$(python3 -c 'from mwb_linux import __version__; print(__version__)')}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 BUILD_ROOT="$LINUX_DIR/build/deb-root"
 DIST_DIR="$LINUX_DIR/dist"
 PACKAGE_FILE="$DIST_DIR/powertoys-mouse-without-borders_${VERSION}_${ARCH}.deb"
 
-if [ "$ARCH" != "amd64" ]; then
-    echo "The checked-in portal helper build currently supports amd64 only." >&2
-    exit 1
-fi
+case "$ARCH" in
+    amd64|arm64) ;;
+    *)
+        echo "Unsupported Debian architecture: $ARCH (expected amd64 or arm64)." >&2
+        exit 1
+        ;;
+esac
 
 cargo build --manifest-path "$LINUX_DIR/portal-bridge/Cargo.toml" --locked --release
 python3 -m compileall -q "$LINUX_DIR/mwb_linux"

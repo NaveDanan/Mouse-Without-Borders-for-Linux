@@ -2,14 +2,14 @@
 
 An independent, full Linux implementation and adaptation of PowerToys Mouse
 Without Borders. It is compatible with the Windows application and lets a
-single mouse and keyboard move between Windows and Debian-based Linux PCs using
+single mouse and keyboard move between Windows and Linux PCs using
 the familiar Mouse Without Borders GUI and connection workflow.
 
 The application speaks the Windows program's native encrypted TCP protocol and
 provides a GTK 4 rebuild of the classic settings form, a per-user background
 service, rootless Wayland input through XDG Desktop Portal and EIS, text/PNG
-clipboard sharing, screen-edge switching, management commands, and a Debian
-package.
+clipboard sharing, screen-edge switching, management commands, and DEB, RPM,
+and AppImage packages for x86-64 and ARM64.
 
 > [!IMPORTANT]
 > This is an independent community project. It is not an official Microsoft or
@@ -24,38 +24,78 @@ package.
 
 ## Install
 
-Download the latest `.deb` from the
+Download the package for your architecture from the
 [GitHub releases](https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux/releases)
-page, then run:
+page. The release provides these files:
+
+| Distribution | x86-64 | ARM64 |
+| --- | --- | --- |
+| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.2_amd64.deb` | `powertoys-mouse-without-borders_0.5.2_arm64.deb` |
+| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.2-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.2-1.aarch64.rpm` |
+| Portable AppImage | `Mouse-Without-Borders-0.5.2-x86_64.AppImage` | `Mouse-Without-Borders-0.5.2-aarch64.AppImage` |
+
+Debian or Ubuntu:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.5.1_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.5.2_amd64.deb
 powertoys-mouse-without-borders
 ```
 
+Fedora or another RPM-based distribution:
+
+```sh
+sudo dnf install ./powertoys-mouse-without-borders-0.5.2-1.x86_64.rpm
+powertoys-mouse-without-borders
+```
+
+Portable AppImage:
+
+```sh
+chmod +x Mouse-Without-Borders-0.5.2-x86_64.AppImage
+./Mouse-Without-Borders-0.5.2-x86_64.AppImage
+```
+
+Replace `amd64`/`x86_64` with `arm64`/`aarch64` on an ARM64 computer. The
+AppImage bundles the application runtime, but the host must still provide a
+systemd user session, XDG Desktop Portal with a compatible compositor backend,
+`xclip` or `wl-clipboard`, and `xdotool`. GNOME installations outside Ubuntu
+may also need a StatusNotifier/AppIndicator shell extension for the top-bar
+menu.
+
 ## Build and test
 
-Ubuntu 24.04 (amd64) is the reference platform.
+Ubuntu 24.04 on x86-64 and ARM64 is the package-build baseline. GNOME 46+
+Wayland is the reference desktop; other desktops require portal backends that
+implement InputCapture and RemoteDesktop v2 with EIS.
 
 Install the build and runtime dependencies:
 
 ```sh
 sudo apt install build-essential cargo python3 python3-gi \
   gir1.2-gtk-4.0 gir1.2-adw-1 python3-cryptography xclip wl-clipboard \
-  xdg-desktop-portal xdg-desktop-portal-gnome dbus-user-session xdotool
+  xdg-desktop-portal xdg-desktop-portal-gnome dbus-user-session xdotool \
+  file rpm python3-dev python3-pip python3-venv squashfs-tools
 ```
+
+Install PyInstaller 6.21.0 in a virtual environment and download the native
+`appimagetool` build when producing an AppImage.
 
 ```sh
 python3 -m unittest discover -s tests -v
 cargo test --manifest-path portal-bridge/Cargo.toml --locked
 cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- -D warnings
 ./packaging/build-deb.sh
+./packaging/build-rpm.sh
+python3 -m venv --system-site-packages build/appimage-venv
+build/appimage-venv/bin/pip install PyInstaller==6.21.0
+APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
+  PATH="$PWD/build/appimage-venv/bin:$PATH" ./packaging/build-appimage.sh
 ```
 
-The package is written to `dist/`. Install a local build with:
+Packages are written to `dist/`. Install a local DEB build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.5.1_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.5.2_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -65,20 +105,18 @@ normal Input Capture and Remote Desktop permission dialogs. The compositor must
 receive the first approval from the signed-in user; an application cannot grant
 itself global input access. The background service retains the approved portal
 session across launches, Connect, Disconnect, Reconnect, suspend, and compatible
-settings changes. On **Exit**, that session is disabled before all network and
-clipboard activity stops; only the dormant authorization holder remains, so
-relaunching does not prompt again. InputCapture v2 desktops also persist the
-compositor's restore token. A logout, permission revocation, monitor-edge change,
-or the explicit `quit` command can still require approval. The service never reads
+settings changes. On **Exit**, the session and all network, clipboard, and input
+components are shut down completely. InputCapture v2 desktops persist the
+compositor's restore token; InputCapture v1 may ask for permission again after a
+full exit. A logout, permission revocation, or monitor-edge change can also require
+approval. The service never reads
 `/dev/input`, writes `/dev/uinput`, or runs as root.
 
 While the UI is running, its Mouse Without Borders indicator remains visible in
 Ubuntu's top bar. Closing the settings window with its **x** or **Close** button
 hides the window without stopping sharing. **Exit** closes the settings and
 indicator, disconnects every peer, stops clipboard watching, releases any active
-input, and disables screen-edge capture. A dormant authorization holder remains
-only because InputCapture v1 cannot otherwise avoid asking again on relaunch.
-Use the `quit` command to destroy that authorization session as well. The
+input, closes the portal session, and stops the background service. The
 indicator uses Ubuntu's built-in StatusNotifierItem/AppIndicator integration
 and does not load GTK 3 into the GTK 4 application.
 
@@ -91,7 +129,8 @@ downloads the matching Debian package, verifies its GitHub-published SHA-256
 digest, and requests administrator authorization through the desktop's normal
 PolicyKit prompt. Mouse Without Borders stays open throughout the download and
 installation, then closes and relaunches itself only after the installed
-package version has been verified.
+package version has been verified. RPM and AppImage installations should update
+from the GitHub release page; their in-app automatic installer is not enabled.
 
 ## Settings form
 
@@ -179,4 +218,4 @@ handshake challenge.
 Released under the [MIT License](LICENSE). This adaptation originated in the
 [Microsoft PowerToys](https://github.com/microsoft/PowerToys) codebase; original
 Microsoft copyright notices are retained. See [ATTRIBUTION.md](ATTRIBUTION.md)
-and the third-party notices included in each Debian package.
+and the third-party notices included in each release package.

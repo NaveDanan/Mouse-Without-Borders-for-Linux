@@ -1,8 +1,9 @@
-name: CI
+name: CI and release
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -11,20 +12,41 @@ permissions:
 
 jobs:
   test-and-package:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            deb_arch: amd64
+            appimage_arch: x86_64
+          - runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            appimage_arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Verify tag matches application version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          app_version=$(/usr/bin/python3 -c 'from mwb_linux import __version__; print(__version__)')
+          test "$tag_version" = "$app_version"
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes \
+          sudo apt-get install --yes --no-install-recommends \
             python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-cryptography \
+            build-essential file python3-dev python3-pip python3-venv \
+            rpm squashfs-tools \
             xclip wl-clipboard xdg-desktop-portal xdg-desktop-portal-gnome \
             dbus-user-session xdotool
+          /usr/bin/python3 -m venv --system-site-packages build/appimage-venv
+          build/appimage-venv/bin/pip install --disable-pip-version-check PyInstaller==6.21.0
 
       - name: Run Python tests
-        run: python3 -m unittest discover -s tests -v
+        run: /usr/bin/python3 -m unittest discover -s tests -v
 
       - name: Test portal bridge
         run: cargo test --manifest-path portal-bridge/Cargo.toml --locked
@@ -33,10 +55,68 @@ jobs:
         run: cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- -D warnings
 
       - name: Build Debian package
+        env:
+          ARCH: ${{ matrix.deb_arch }}
         run: ./packaging/build-deb.sh
 
-      - name: Upload Debian package
+      - name: Build RPM package
+        run: ./packaging/build-rpm.sh
+
+      - name: Download appimagetool
+        env:
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          curl --fail --location --retry 3 \
+            --output build/appimagetool.AppImage \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${APPIMAGE_ARCH}.AppImage"
+          chmod 0755 build/appimagetool.AppImage
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+          APPIMAGETOOL: ${{ github.workspace }}/build/appimagetool.AppImage
+        run: |
+          export PATH="${{ github.workspace }}/build/appimage-venv/bin:$PATH"
+          ./packaging/build-appimage.sh
+
+      - name: Inspect packages
+        run: |
+          dpkg-deb --info dist/*.deb >/dev/null
+          rpm --query --package --info dist/*.rpm
+          file dist/*.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --help >/dev/null
+
+      - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
-          name: powertoys-mouse-without-borders-amd64
-          path: dist/*.deb
+          name: packages-${{ matrix.deb_arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test-and-package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: packages-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Mouse Without Borders for Linux $GITHUB_REF_NAME" \
+            --generate-notes \
+            --latest

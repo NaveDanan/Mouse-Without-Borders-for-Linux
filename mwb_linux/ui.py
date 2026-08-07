@@ -35,6 +35,7 @@ from .monitors import (
 from .service import control_request
 from .updater import (
     UpdateRelease,
+    automatic_install_supported,
     check_for_update,
     download_release,
     install_package,
@@ -236,6 +237,11 @@ def _start_background_service() -> None:
     # transient unit so portal prompts and short-lived clipboard helpers are
     # attributed to Mouse Without Borders instead of flashing the IDE's icon.
     source_root = module_path.parents[1]
+    if getattr(sys, "frozen", False):
+        appimage = os.environ.get("APPIMAGE")
+        launch_command = [appimage or sys.executable, "daemon"]
+    else:
+        launch_command = [sys.executable, "-m", "mwb_linux", "daemon"]
     try:
         result = subprocess.run(
             [
@@ -246,10 +252,7 @@ def _start_background_service() -> None:
                 f"--unit={SOURCE_SYSTEMD_UNIT}",
                 "--property=Type=exec",
                 f"--setenv=PYTHONPATH={source_root}",
-                sys.executable,
-                "-m",
-                "mwb_linux",
-                "daemon",
+                *launch_command,
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1257,6 +1260,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
         if self._update_check_running or self._installing_update:
             return
+        if not automatic_install_supported():
+            if manual:
+                self.update_status.set_text("Download updates from GitHub Releases")
+            return
         self._update_check_running = True
         self.update_refresh.set_sensitive(False)
         if manual:
@@ -1395,6 +1402,14 @@ class MainWindow(Gtk.ApplicationWindow):
         threading.Thread(target=start, name="mwb-service-start", daemon=True).start()
 
     def _poll_status(self) -> bool:
+        application = self.get_application()
+        if (
+            isinstance(application, MouseWithoutBordersApplication)
+            and application._exit_started
+        ):
+            # Do not let the normal self-healing status poll restart the service
+            # after top-bar Exit has deliberately begun shutting it down.
+            return GLib.SOURCE_REMOVE
         try:
             status = control_request("status", timeout=STATUS_TIMEOUT)["status"]
         except Exception:
@@ -1458,6 +1473,7 @@ class MouseWithoutBordersApplication(Adw.Application):
         self.window: MainWindow | None = None
         self.indicator: TopBarIndicator | None = None
         self._held_for_indicator = False
+        self._exit_started = False
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
@@ -1480,8 +1496,8 @@ class MouseWithoutBordersApplication(Adw.Application):
         self.indicator.start()
 
     def do_activate(self) -> None:
-        # A previous top-bar Exit leaves only a disabled portal grant alive.
-        # Reconnect and re-enable it now, without asking for permission again.
+        # Ensure the background service exists without blocking window startup.
+        # resume_ui also remains compatible with daemons parked by an older UI.
         threading.Thread(
             target=lambda: _request("resume_ui"),
             name="mwb-service-resume",
@@ -1500,33 +1516,67 @@ class MouseWithoutBordersApplication(Adw.Application):
         self.window.show_settings()
 
     def exit_application(self) -> None:
-        """Stop all sharing and close the UI."""
+        """Shut down every application component without blocking GTK."""
+
+        # DBusMenu hosts occasionally deliver both Event and EventGroup for one
+        # click. Cleanup must only run once, especially while the first worker
+        # is waiting for the input portal to release its session.
+        if self._exit_started:
+            return
+        self._exit_started = True
+        if self.indicator is not None:
+            self.indicator.stop()
+            self.indicator = None
+        if self.window is not None:
+            self.window.set_visible(False)
+
+        # Portal and network teardown can take several seconds. Running it in
+        # this callback would stop GTK's main loop while GNOME Shell is still
+        # completing the indicator menu event, making the desktop appear hung.
+        threading.Thread(
+            target=self._stop_service_and_finish_exit,
+            name="mwb-application-exit",
+            daemon=True,
+        ).start()
+
+    def _stop_service_and_finish_exit(self) -> None:
+        """Request a full service stop, with systemd as a bounded fallback."""
 
         try:
-            response = control_request("exit_ui")
+            response = control_request("quit", timeout=2.0)
             if not response.get("ok"):
                 raise OSError(str(response.get("error", "exit was rejected")))
-        except (OSError, TimeoutError) as exc:
-            # Fail closed: if the daemon cannot acknowledge the dormant state,
-            # stop its unit so Exit can never leave input sharing active.
-            LOGGER.warning("could not stop sharing cleanly: %s", exc)
+        except (OSError, TimeoutError, ValueError) as exc:
+            # Fail closed: if the control socket cannot begin shutdown, ask
+            # systemd to terminate either the installed or development unit.
+            LOGGER.warning("could not request a clean application shutdown: %s", exc)
             try:
                 subprocess.run(
-                    ["systemctl", "--user", "stop", SYSTEMD_UNIT],
+                    [
+                        "systemctl",
+                        "--user",
+                        "stop",
+                        SYSTEMD_UNIT,
+                        SOURCE_SYSTEMD_UNIT,
+                    ],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    timeout=3,
+                    timeout=5,
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as stop_error:
                 LOGGER.error("could not stop the sharing service: %s", stop_error)
-        if self.indicator is not None:
-            self.indicator.stop()
+        GLib.idle_add(self._finish_exit)
+
+    def _finish_exit(self) -> bool:
+        """Release GApplication's indicator hold from GTK's main thread."""
+
         if self._held_for_indicator:
             self.release()
             self._held_for_indicator = False
         self.quit()
+        return GLib.SOURCE_REMOVE
 
 
 def run_ui(argv: list[str] | None = None) -> int:

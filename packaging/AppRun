@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+export PATH="$APPDIR/usr/lib/powertoys-mouse-without-borders:$PATH"
+exec "$APPDIR/usr/lib/powertoys-mouse-without-borders/powertoys-mouse-without-borders" "$@"

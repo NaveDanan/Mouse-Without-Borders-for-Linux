@@ -15,6 +15,7 @@ from mwb_linux.input import (
     WM_MOUSEWHEEL,
     WM_XBUTTONDOWN,
     capture_targets,
+    find_bridge,
     portal_environment,
 )
 from mwb_linux.protocol import PackageType
@@ -39,6 +40,31 @@ class FakeBridge:
 
 
 class InputTests(unittest.TestCase):
+    def test_frozen_application_finds_its_co_packaged_portal_bridge(self):
+        executable = "/tmp/AppDir/usr/lib/mwb/powertoys-mouse-without-borders"
+        expected = "/tmp/AppDir/usr/lib/mwb/mwb-portal-bridge"
+        with (
+            patch.dict("mwb_linux.input.os.environ", {}, clear=True),
+            patch("mwb_linux.input.sys.frozen", True, create=True),
+            patch("mwb_linux.input.sys.executable", executable),
+            patch("mwb_linux.input.os.access", side_effect=lambda path, _mode: path == expected),
+        ):
+            self.assertEqual(find_bridge(), expected)
+
+    def test_appimage_portal_identity_uses_its_embedded_desktop_file(self):
+        appdir = "/tmp/.mount_mwb"
+        with (
+            patch.dict("mwb_linux.input.os.environ", {"APPDIR": appdir}, clear=True),
+            patch("mwb_linux.input.Path.is_file", return_value=True),
+        ):
+            environment = portal_environment()
+
+        self.assertEqual(
+            environment["GIO_LAUNCHED_DESKTOP_FILE"],
+            f"{appdir}/usr/share/applications/"
+            "io.github.NaveDanan.MouseWithoutBorders.desktop",
+        )
+
     def test_portal_state_request_waits_for_matching_acknowledgement(self):
         messages = []
         bridge = PortalBridge(messages.append)

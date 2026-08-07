@@ -12,6 +12,7 @@ from mwb_linux.updater import (
     PACKAGE_NAME,
     UpdateError,
     UpdateRelease,
+    automatic_install_supported,
     check_for_update,
     download_release,
     install_package,
@@ -51,6 +52,15 @@ def release_payload(version: str, content: bytes) -> dict[str, object]:
 
 
 class UpdateCheckTests(unittest.TestCase):
+    def test_automatic_install_is_disabled_for_appimage_and_non_debian_hosts(self):
+        with patch.dict("mwb_linux.updater.os.environ", {"APPIMAGE": "/tmp/app"}):
+            self.assertFalse(automatic_install_supported())
+        with (
+            patch.dict("mwb_linux.updater.os.environ", {}, clear=True),
+            patch("mwb_linux.updater.shutil.which", return_value=None),
+        ):
+            self.assertFalse(automatic_install_supported())
+
     def test_stable_versions_compare_numerically(self):
         self.assertGreater(version_key("v0.10.0"), version_key("0.9.9"))
         with self.assertRaises(UpdateError):
@@ -182,6 +192,22 @@ class UpdateInstallTests(unittest.TestCase):
         arguments = popen.call_args.args[0]
         self.assertEqual(arguments[-2:], ["/usr/bin/example", "ui"])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_appimage_relaunch_uses_the_original_image(self):
+        child = SimpleNamespace(pid=123)
+        with (
+            patch.dict(
+                "mwb_linux.updater.os.environ",
+                {"APPIMAGE": "/opt/Mouse-Without-Borders.AppImage"},
+                clear=True,
+            ),
+            patch("mwb_linux.updater.subprocess.Popen", return_value=child) as popen,
+        ):
+            self.assertIs(schedule_relaunch(), child)
+
+        self.assertEqual(
+            popen.call_args.args[0][-1], "/opt/Mouse-Without-Borders.AppImage"
+        )
 
 
 if __name__ == "__main__":

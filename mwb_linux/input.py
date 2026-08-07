@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -94,6 +95,11 @@ def find_bridge() -> str | None:
     module_root = Path(__file__).resolve().parents[1]
     installed_root = Path("/usr/lib/powertoys-mouse-without-borders")
     installed = str(installed_root / "mwb-portal-bridge")
+    frozen = (
+        str(Path(sys.executable).with_name("mwb-portal-bridge"))
+        if getattr(sys, "frozen", False)
+        else None
+    )
     source = [
         str(module_root / "portal-bridge" / "target" / "release" / "mwb-portal-bridge"),
         str(module_root / "portal-bridge" / "target" / "debug" / "mwb-portal-bridge"),
@@ -105,6 +111,7 @@ def find_bridge() -> str | None:
     preferred = [installed, *source] if packaged else [*source, installed]
     candidates = [
         override,
+        frozen,
         *preferred,
         shutil.which("mwb-portal-bridge"),
     ]
@@ -117,7 +124,13 @@ def portal_environment() -> dict[str, str]:
     environment = os.environ.copy()
     module_root = Path(__file__).resolve().parents[1]
     installed_root = Path("/usr/lib/powertoys-mouse-without-borders")
-    if module_root.is_relative_to(installed_root):
+    appdir = os.environ.get("APPDIR")
+    if appdir:
+        desktop_file = (
+            Path(appdir)
+            / "usr/share/applications/io.github.NaveDanan.MouseWithoutBorders.desktop"
+        )
+    elif module_root.is_relative_to(installed_root):
         desktop_file = Path(
             "/usr/share/applications/io.github.NaveDanan.MouseWithoutBorders.desktop"
         )
