@@ -4,7 +4,7 @@ Section: utils
 Priority: optional
 Architecture: @ARCH@
 Maintainer: Nave Danan <nave0712@gmail.com>
-Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, python3-cryptography, libc6 (>= 2.39), libgcc-s1, xclip, wl-clipboard, xdg-desktop-portal (>= 1.18), dbus-user-session, xdotool
+Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, python3-cryptography, libc6 (>= 2.39), libgcc-s1, xclip, wl-clipboard, xdg-desktop-portal (>= 1.18), dbus-user-session, xdotool, pkexec
 Recommends: xdg-desktop-portal-gnome (>= 46)
 Homepage: https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux
 Description: Mouse Without Borders Linux companion

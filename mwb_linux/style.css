@@ -275,6 +275,11 @@
   color: #000000;
 }
 
+.mwb-update-status {
+  color: #555555;
+  font-size: 11px;
+}
+
 .mwb-root textview.mwb-ip-text,
 .mwb-root textview.mwb-ip-text text {
   background: #ffffff;

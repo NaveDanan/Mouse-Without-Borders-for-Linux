@@ -5,7 +5,7 @@
   <summary>Share input and clipboard across Linux and Windows PCs</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <developer id="io.github.NaveDanan">
+  <developer id="io.github.navedanan">
     <name>Nave Danan and contributors</name>
   </developer>
   <url type="homepage">https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux</url>
@@ -28,6 +28,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.0" date="2026-08-07">
+      <description>
+        <p>
+          Add silent background update checks, update controls in Settings,
+          verified GitHub release downloads, automatic Debian package
+          installation, and relaunch only after the new version is installed.
+        </p>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-08-07">
       <description>
         <p>

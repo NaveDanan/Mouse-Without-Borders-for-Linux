@@ -22,6 +22,7 @@ from mwb_linux.ui import (
     matrix_coordinates,
     remote_records,
 )
+from mwb_linux.updater import UpdateRelease
 
 
 class SettingsFormConfigTests(unittest.TestCase):
@@ -134,6 +135,7 @@ class SettingsFormConfigTests(unittest.TestCase):
             config = Config(
                 secret="0123456789abcdef",
                 host="pc",
+                check_updates=False,
                 two_row=True,
                 host_zone=[1920, 0, 2560, 1440],
                 switch_hotkey="numbers",
@@ -144,6 +146,7 @@ class SettingsFormConfigTests(unittest.TestCase):
             config.save(path)
             reloaded = Config.load(path)
             self.assertTrue(reloaded.two_row)
+            self.assertFalse(reloaded.check_updates)
             self.assertEqual(reloaded.host_zone, [1920, 0, 2560, 1440])
             self.assertEqual(reloaded.switch_hotkey, "numbers")
             self.assertTrue(reloaded.other_options["wrap_mouse"])
@@ -324,6 +327,115 @@ class BackgroundServiceTests(unittest.TestCase):
                 _start_background_service()
 
         popen.assert_not_called()
+
+
+class UpdateUiTests(unittest.TestCase):
+    def setUp(self):
+        self.release = UpdateRelease(
+            version="0.5.0",
+            tag="v0.5.0",
+            page_url="https://example.invalid/release",
+            asset_name="update.deb",
+            asset_url="https://example.invalid/update.deb",
+            asset_size=20,
+            sha256="0" * 64,
+        )
+
+    def test_automatic_check_failure_is_silent(self):
+        form = SimpleNamespace(
+            _update_check_running=True,
+            config=SimpleNamespace(check_updates=True),
+            update_refresh=SimpleNamespace(set_sensitive=Mock()),
+            update_status=SimpleNamespace(set_text=Mock()),
+        )
+
+        MainWindow._finish_update_check(form, None, False, False)
+
+        form.update_status.set_text.assert_not_called()
+        form.update_refresh.set_sensitive.assert_called_once_with(True)
+
+    def test_disabling_checks_while_one_is_running_suppresses_its_result(self):
+        form = SimpleNamespace(
+            _update_check_running=True,
+            _announced_update="",
+            config=SimpleNamespace(check_updates=False),
+            update_refresh=SimpleNamespace(set_sensitive=Mock()),
+            update_status=SimpleNamespace(set_text=Mock()),
+            _show_update_available=Mock(),
+        )
+
+        MainWindow._finish_update_check(form, self.release, False, True)
+
+        form.update_status.set_text.assert_not_called()
+        form._show_update_available.assert_not_called()
+
+    def test_manual_check_reports_current_version_inline(self):
+        form = SimpleNamespace(
+            _update_check_running=True,
+            config=SimpleNamespace(check_updates=True),
+            update_refresh=SimpleNamespace(set_sensitive=Mock()),
+            update_status=SimpleNamespace(set_text=Mock()),
+        )
+
+        MainWindow._finish_update_check(form, None, True, True)
+
+        form.update_status.set_text.assert_called_once_with("Up to date (0.4.0)")
+
+    def test_new_version_is_announced_once(self):
+        form = SimpleNamespace(
+            _update_check_running=True,
+            _announced_update="",
+            config=SimpleNamespace(check_updates=True),
+            update_refresh=SimpleNamespace(set_sensitive=Mock()),
+            update_status=SimpleNamespace(set_text=Mock()),
+            _show_update_available=Mock(),
+        )
+
+        MainWindow._finish_update_check(form, self.release, False, True)
+
+        form.update_status.set_text.assert_called_once_with("Version 0.5.0 available")
+        form._show_update_available.assert_called_once_with(self.release)
+
+    def test_update_dialog_shows_current_and_latest_versions(self):
+        dialog = Mock()
+        form = SimpleNamespace(present=Mock(), _on_update_choice=Mock())
+        with patch("mwb_linux.ui.Gtk.AlertDialog", return_value=dialog):
+            MainWindow._show_update_available(form, self.release)
+
+        form.present.assert_called_once_with()
+        detail = dialog.set_detail.call_args.args[0]
+        self.assertIn("Current version: 0.4.0", detail)
+        self.assertIn("Latest version: 0.5.0", detail)
+        dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
+
+    def test_failed_install_keeps_the_application_open(self):
+        application = SimpleNamespace(quit=Mock())
+        form = SimpleNamespace(
+            _installing_update=True,
+            update_refresh=SimpleNamespace(set_sensitive=Mock()),
+            update_status=SimpleNamespace(set_text=Mock()),
+            get_application=Mock(return_value=application),
+        )
+        with patch("mwb_linux.ui.schedule_relaunch") as relaunch:
+            MainWindow._finish_update_install(form, self.release, False)
+
+        relaunch.assert_not_called()
+        application.quit.assert_not_called()
+        self.assertFalse(form._installing_update)
+
+    def test_successful_install_schedules_relaunch_then_closes(self):
+        application = SimpleNamespace(quit=Mock())
+        form = SimpleNamespace(
+            _installing_update=True,
+            update_refresh=SimpleNamespace(set_sensitive=Mock()),
+            update_status=SimpleNamespace(set_text=Mock()),
+            get_application=Mock(return_value=application),
+        )
+        with patch("mwb_linux.ui.schedule_relaunch") as relaunch:
+            MainWindow._finish_update_install(form, self.release, True)
+
+        relaunch.assert_called_once_with()
+        application.quit.assert_called_once_with()
 
 
 class DesktopShortcutTests(unittest.TestCase):

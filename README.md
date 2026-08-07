@@ -29,7 +29,7 @@ Download the latest `.deb` from the
 page, then run:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.3.1_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.4.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -55,7 +55,7 @@ cargo clippy --manifest-path portal-bridge/Cargo.toml --locked --all-targets -- 
 The package is written to `dist/`. Install a local build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.3.1_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.4.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -76,6 +76,17 @@ indicator to open its **Open**, **Settings**, and **Exit** menu; only **Exit**
 stops the background service and terminates the application. The indicator
 uses Ubuntu's built-in StatusNotifierItem/AppIndicator integration and does not
 load GTK 3 into the GTK 4 application.
+
+On each launch, the application checks the latest stable GitHub release in the
+background. Being up to date and temporary network failures are silent. The
+**Check Updates** checkbox on the Other Options tab controls launch checks, and
+**Refresh** performs an immediate manual check. When an update is available,
+the dialog shows the installed and latest versions. **Download and Install**
+downloads the matching Debian package, verifies its GitHub-published SHA-256
+digest, and requests administrator authorization through the desktop's normal
+PolicyKit prompt. Mouse Without Borders stays open throughout the download and
+installation, then closes and relaunches itself only after the installed
+package version has been verified.
 
 ## Settings form
 

@@ -33,6 +33,13 @@ from .monitors import (
     read_monitors,
 )
 from .service import control_request
+from .updater import (
+    UpdateRelease,
+    check_for_update,
+    download_release,
+    install_package,
+    schedule_relaunch,
+)
 from .widgets import (
     APP_ID,
     ICON_DIRECTORY,
@@ -449,6 +456,10 @@ class MainWindow(Gtk.ApplicationWindow):
         }
         self._log_window: Gtk.Window | None = None
         self._service_started_at = 0.0
+        self._loading_config = True
+        self._update_check_running = False
+        self._installing_update = False
+        self._announced_update = ""
         self.machine_cards: dict[int, MatrixCell] = {}
         self._read_monitors()
 
@@ -475,9 +486,12 @@ class MainWindow(Gtk.ApplicationWindow):
         if display is not None:
             display.get_monitors().connect("items-changed", self._on_monitors_changed)
         self._load_config()
+        self._loading_config = False
         if not self._secret:
             self.show_wizard_page("start")
         GLib.timeout_add_seconds(1, self._poll_status)
+        if self.config.check_updates:
+            self._start_update_check()
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Hide the form while the application remains in the top bar."""
@@ -663,6 +677,20 @@ class MainWindow(Gtk.ApplicationWindow):
                 column.append(button)
             columns.append(column)
         page.append(columns)
+
+        updates = horizontal(8)
+        updates.set_margin_bottom(8)
+        self.check_updates = check_button("Check Updates")
+        self.check_updates.connect("toggled", self._on_check_updates_toggled)
+        updates.append(self.check_updates)
+        self.update_status = label("", css="mwb-update-status")
+        self.update_status.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        self.update_status.set_hexpand(True)
+        self.update_status.set_halign(Gtk.Align.END)
+        updates.append(self.update_status)
+        self.update_refresh = push_button("Refresh", self._manual_update_check)
+        updates.append(self.update_refresh)
+        page.append(updates)
 
         shortcuts = Fieldset("Keyboard Shortcuts")
         switch_row = horizontal(16)
@@ -945,6 +973,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 LETTER_CHOICES.index(value) if value in LETTER_CHOICES else 0
             )
         self.easy_mouse.set_selected(0 if config.edge_switching else 1)
+        self.check_updates.set_active(config.check_updates)
 
         self.mappings_view.get_buffer().set_text(config.ip_mappings)
         self.port.set_value(config.port)
@@ -996,6 +1025,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "share_clipboard": self.option_buttons["share_clipboard"].get_active(),
             "share_images": self.option_buttons["share_images"].get_active(),
             "edge_switching": dropdown_value(self.easy_mouse) == "Enable",
+            "check_updates": self.check_updates.get_active(),
             "switch_hotkey": switch_hotkey,
             "other_options": other_options,
             "hotkeys": hotkeys,
@@ -1203,6 +1233,149 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.set_message("Mouse without Borders")
         dialog.set_detail(message)
         dialog.show(self)
+
+    # ------------------------------------------------------------- updates
+
+    def _on_check_updates_toggled(self, button: Gtk.CheckButton) -> None:
+        """Persist the launch-check preference without requiring Apply."""
+
+        if self._loading_config:
+            return
+        self.config.check_updates = button.get_active()
+        try:
+            self.config.save()
+        except OSError as exc:
+            LOGGER.warning("could not save update preference: %s", exc)
+        if button.get_active():
+            self._start_update_check()
+
+    def _manual_update_check(self) -> None:
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual: bool = False) -> None:
+        """Check GitHub off the GTK thread; automatic failures stay silent."""
+
+        if self._update_check_running or self._installing_update:
+            return
+        self._update_check_running = True
+        self.update_refresh.set_sensitive(False)
+        if manual:
+            self.update_status.set_text("Checking...")
+
+        def check() -> None:
+            try:
+                release = check_for_update(__version__)
+            except Exception as exc:
+                LOGGER.info("update check unavailable: %s", exc)
+                GLib.idle_add(self._finish_update_check, None, manual, False)
+            else:
+                GLib.idle_add(self._finish_update_check, release, manual, True)
+
+        threading.Thread(target=check, name="mwb-update-check", daemon=True).start()
+
+    def _finish_update_check(
+        self,
+        release: UpdateRelease | None,
+        manual: bool,
+        succeeded: bool,
+    ) -> bool:
+        self._update_check_running = False
+        self.update_refresh.set_sensitive(True)
+        if not manual and not self.config.check_updates:
+            return GLib.SOURCE_REMOVE
+        if not succeeded:
+            if manual:
+                self.update_status.set_text("Unable to check right now")
+            return GLib.SOURCE_REMOVE
+        if release is None:
+            if manual:
+                self.update_status.set_text(f"Up to date ({__version__})")
+            return GLib.SOURCE_REMOVE
+        self.update_status.set_text(f"Version {release.version} available")
+        if manual or self._announced_update != release.version:
+            self._announced_update = release.version
+            self._show_update_available(release)
+        return GLib.SOURCE_REMOVE
+
+    def _show_update_available(self, release: UpdateRelease) -> None:
+        self.present()
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("A new version is available")
+        dialog.set_detail(
+            f"Current version: {__version__}\nLatest version: {release.version}\n\n"
+            "Mouse without Borders will remain open while the update downloads "
+            "and installs, then close and relaunch automatically."
+        )
+        dialog.set_buttons(["Later", "Download and Install"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(1)
+        dialog.choose(
+            self,
+            None,
+            lambda source, result, *_: self._on_update_choice(
+                source, result, release
+            ),
+        )
+
+    def _on_update_choice(
+        self,
+        dialog: Gtk.AlertDialog,
+        result: Gio.AsyncResult,
+        release: UpdateRelease,
+    ) -> None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice == 1:
+            self._install_update(release)
+
+    def _install_update(self, release: UpdateRelease) -> None:
+        if self._installing_update:
+            return
+        self._installing_update = True
+        self.update_refresh.set_sensitive(False)
+        self.update_status.set_text(f"Downloading {release.version}...")
+
+        def install() -> None:
+            try:
+                package = download_release(release)
+                GLib.idle_add(
+                    self.update_status.set_text,
+                    f"Installing {release.version}...",
+                )
+                install_package(package, release.version)
+            except Exception as exc:
+                LOGGER.warning("update failed: %s", exc)
+                GLib.idle_add(self._finish_update_install, release, False)
+            else:
+                GLib.idle_add(self._finish_update_install, release, True)
+
+        threading.Thread(target=install, name="mwb-update-install", daemon=True).start()
+
+    def _finish_update_install(
+        self, release: UpdateRelease, succeeded: bool
+    ) -> bool:
+        if not succeeded:
+            self._installing_update = False
+            self.update_refresh.set_sensitive(True)
+            self.update_status.set_text("Update was not installed")
+            return GLib.SOURCE_REMOVE
+        self.update_status.set_text(f"Updated to {release.version}; relaunching...")
+        try:
+            schedule_relaunch()
+        except Exception as exc:
+            LOGGER.warning("could not relaunch after update: %s", exc)
+            self._installing_update = False
+            self.update_refresh.set_sensitive(True)
+            self.update_status.set_text("Updated; close and reopen to finish")
+            return GLib.SOURCE_REMOVE
+        application = self.get_application()
+        if isinstance(application, MouseWithoutBordersApplication):
+            application.exit_application()
+        else:
+            application.quit()
+        return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------- status
 

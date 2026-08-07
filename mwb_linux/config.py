@@ -149,6 +149,7 @@ class Config:
     edge_switching: bool = True
     switch_hotkey: str = "disabled"
     auto_connect: bool = True
+    check_updates: bool = True
     crypto_profile: str = "auto"
     two_row: bool = False
     ip_mappings: str = ""
