@@ -1,10 +1,11 @@
+import os
 import socket
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from mwb_linux.config import Config
 from mwb_linux.crypto import CryptoProfile
@@ -302,6 +303,144 @@ class FileTransferTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(packets[-1].dest, 20)
+
+    def test_edge_monitor_caches_drag_before_portal_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "caught-before-crossing.txt"
+            path.write_text("payload", encoding="utf-8")
+            packets = []
+            probe = Mock(return_value=None)
+            peer = TransferPeer("windows", 20, "127.0.0.1", "legacy-50k")
+            manager = FileTransferManager(
+                Config(machine_name="linux", machine_id=10, share_images=True),
+                packets.append,
+                lambda machine_id: peer if machine_id == 20 else None,
+                Mock(),
+                Mock(),
+                drag_probe=probe,
+                visual_feedback=False,
+            )
+
+            manager._record_drag_candidate(path)
+            self.assertEqual(packets, [])
+            manager.control_changed(20)
+
+            self.assertEqual(
+                [packet.type for packet in packets],
+                [
+                    PackageType.CLIPBOARD_DRAG_DROP,
+                    PackageType.CLIPBOARD_DRAG_DROP_OPERATION,
+                ],
+            )
+            self.assertEqual(packets[0].dest, 255)
+            self.assertEqual(packets[1].dest, 20)
+            self.assertEqual(manager._staged_file, path.resolve())
+            probe.assert_not_called()
+
+    def test_edge_monitor_result_after_handoff_stages_exactly_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "caught-after-crossing.txt"
+            path.write_text("payload", encoding="utf-8")
+            packets = []
+            peer = TransferPeer("windows", 20, "127.0.0.1", "legacy-50k")
+            manager = FileTransferManager(
+                Config(machine_name="linux", machine_id=10, share_images=True),
+                packets.append,
+                lambda machine_id: peer if machine_id == 20 else None,
+                Mock(),
+                Mock(),
+                drag_probe=lambda: None,
+                visual_feedback=False,
+            )
+            manager._local_destination_id = 20
+
+            manager._record_drag_candidate(path)
+            manager.control_changed(20)
+
+            self.assertEqual(
+                [packet.type for packet in packets],
+                [
+                    PackageType.CLIPBOARD_DRAG_DROP,
+                    PackageType.CLIPBOARD_DRAG_DROP_OPERATION,
+                ],
+            )
+
+    def test_drag_monitor_matches_the_configured_transition_monitor(self):
+        manager = FileTransferManager(
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                host_position="right",
+                host_zone=[1920, 0, 2560, 1440],
+                share_images=True,
+                machine_matrix=["linux", "windows", "", ""],
+                remote_machines=[{"name": "windows", "address": "192.0.2.20"}],
+            ),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            visual_feedback=False,
+        )
+
+        self.assertEqual(
+            manager._drag_monitor_targets(),
+            [{"edge": "right", "zone": [1920, 0, 2560, 1440]}],
+        )
+
+    def test_windows_drag_shows_and_hides_drop_animation(self):
+        process = Mock()
+        process.poll.return_value = None
+        started = threading.Event()
+        manager = FileTransferManager(
+            Config(machine_name="linux", machine_id=10, share_images=True),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+        )
+        manager._download_worker = lambda _source: started.set()
+        advertisement = Packet()
+        advertisement.type = PackageType.CLIPBOARD_DRAG_DROP
+        advertisement.src = 20
+        operation = Packet()
+        operation.type = PackageType.CLIPBOARD_DRAG_DROP_OPERATION
+        operation.dest = 10
+
+        with patch.dict(os.environ, {"DISPLAY": ":0"}), patch(
+            "mwb_linux.file_transfer.subprocess.Popen", return_value=process
+        ) as popen:
+            manager.process_packet(advertisement)
+            manager.process_packet(operation)
+            popen.assert_called_once()
+            self.assertIn("_drop-indicator", popen.call_args.args[0])
+
+            manager.handle_remote_mouse(WM_LBUTTONUP)
+
+        self.assertTrue(started.wait(1))
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=1)
+
+    def test_right_button_cancels_windows_drag_animation_without_downloading(self):
+        process = Mock()
+        process.poll.return_value = None
+        manager = FileTransferManager(
+            Config(machine_name="linux", machine_id=10, share_images=True),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+        )
+        manager._download_worker = Mock()
+        manager._drop_indicator_process = process
+        manager._remote_source_id = 20
+        manager._remote_drop_active = True
+
+        manager.handle_remote_mouse(0x205)
+
+        process.terminate.assert_called_once_with()
+        manager._download_worker.assert_not_called()
+        self.assertFalse(manager._remote_drop_active)
 
     def test_drag_end_cancels_a_probe_that_has_not_returned_yet(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -28,6 +28,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.4" date="2026-08-13">
+      <description>
+        <p>
+          Capture Linux-origin file drags before the Wayland input handoff so
+          files reliably transfer to Windows, and add PowerToys-style visible
+          drop feedback with multi-monitor placement and clean cancellation.
+        </p>
+      </description>
+    </release>
     <release version="0.5.3" date="2026-08-12">
       <description>
         <p>

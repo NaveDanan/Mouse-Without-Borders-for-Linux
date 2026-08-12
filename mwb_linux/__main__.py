@@ -161,6 +161,14 @@ def main(argv: list[str] | None = None) -> int:
         from .drag_capture import main as drag_capture_main
 
         return drag_capture_main()
+    if arguments == ["_drag-monitor"]:
+        from .drag_capture import monitor_main
+
+        return monitor_main()
+    if arguments == ["_drop-indicator"]:
+        from .drag_capture import indicator_main
+
+        return indicator_main()
     parser = build_parser()
     args = parser.parse_args(arguments)
     if args.command in (None, "ui"):

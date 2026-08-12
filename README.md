@@ -31,29 +31,29 @@ page. The release provides these files:
 
 | Distribution | x86-64 | ARM64 |
 | --- | --- | --- |
-| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.3_amd64.deb` | `powertoys-mouse-without-borders_0.5.3_arm64.deb` |
-| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.3-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.3-1.aarch64.rpm` |
-| Portable AppImage | `Mouse-Without-Borders-0.5.3-x86_64.AppImage` | `Mouse-Without-Borders-0.5.3-aarch64.AppImage` |
+| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.4_amd64.deb` | `powertoys-mouse-without-borders_0.5.4_arm64.deb` |
+| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.4-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.4-1.aarch64.rpm` |
+| Portable AppImage | `Mouse-Without-Borders-0.5.4-x86_64.AppImage` | `Mouse-Without-Borders-0.5.4-aarch64.AppImage` |
 
 Debian or Ubuntu:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.5.3_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.5.4_amd64.deb
 powertoys-mouse-without-borders
 ```
 
 Fedora or another RPM-based distribution:
 
 ```sh
-sudo dnf install ./powertoys-mouse-without-borders-0.5.3-1.x86_64.rpm
+sudo dnf install ./powertoys-mouse-without-borders-0.5.4-1.x86_64.rpm
 powertoys-mouse-without-borders
 ```
 
 Portable AppImage:
 
 ```sh
-chmod +x Mouse-Without-Borders-0.5.3-x86_64.AppImage
-./Mouse-Without-Borders-0.5.3-x86_64.AppImage
+chmod +x Mouse-Without-Borders-0.5.4-x86_64.AppImage
+./Mouse-Without-Borders-0.5.4-x86_64.AppImage
 ```
 
 Replace `amd64`/`x86_64` with `arm64`/`aarch64` on an ARM64 computer. The
@@ -96,7 +96,7 @@ APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
 Packages are written to `dist/`. Install a local DEB build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.5.3_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.5.4_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -166,7 +166,8 @@ profile before that socket is accepted. Files arriving on Linux are written
 atomically without overwriting an existing file under
 `Desktop/MouseWithoutBorders`. Mouse Without Borders' native protocol supports
 one file per drag and does not transfer directories; zip a folder before
-dragging it.
+dragging it. A visible drop target follows the remote pointer on Linux, while
+Windows shows its native PowerToys Mouse Without Borders drag animation.
 
 Absolute remote pointer coordinates alone cannot activate GNOME Shell pressure
 barriers. On a desktop edge that is not assigned to another matrix computer,

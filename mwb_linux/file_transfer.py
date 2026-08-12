@@ -20,6 +20,7 @@ from .clipboard import background_environment
 from .config import Config
 from .crypto import CryptoProfile, EncryptedSocket
 from .protocol import ID_ALL, ID_NONE, PACKAGE_SIZE_EX, Packet, PackageType
+from .topology import neighbour
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ CLIPBOARD_HEADER_SIZE = 1024
 TRANSFER_CHUNK_SIZE = 64 * 1024
 TRANSFER_POST_ACTION_DESKTOP = 1
 DRAG_PROBE_TIMEOUT = 2.5
+DRAG_CANDIDATE_LIFETIME = 3.0
+DRAG_LEAVE_GRACE = 1.0
 STAGED_FILE_LIFETIME = 120.0
 WINDOWS_INVALID_FILENAME = '<>:"/\\|?*'
 WINDOWS_RESERVED_FILENAMES = {
@@ -53,10 +56,14 @@ class TransferPeer:
     profile: str
 
 
-def _drag_probe_command() -> list[str]:
+def _helper_command(name: str) -> list[str]:
     if getattr(sys, "frozen", False):
-        return [sys.executable, "_drag-capture"]
-    return [sys.executable, "-m", "mwb_linux", "_drag-capture"]
+        return [sys.executable, name]
+    return [sys.executable, "-m", "mwb_linux", name]
+
+
+def _drag_probe_command() -> list[str]:
+    return _helper_command("_drag-capture")
 
 
 def probe_dragged_file(timeout: float = DRAG_PROBE_TIMEOUT) -> Path | None:
@@ -172,6 +179,7 @@ class FileTransferManager:
         *,
         drag_probe: Callable[[], Path | None] = probe_dragged_file,
         destination_root: Path | None = None,
+        visual_feedback: bool = True,
     ) -> None:
         self.config = config
         self.send_packet = send_packet
@@ -180,6 +188,7 @@ class FileTransferManager:
         self.status_callback = status_callback
         self.drag_probe = drag_probe
         self.destination_root = destination_root
+        self.visual_feedback = visual_feedback
         self._stop = threading.Event()
         self._listener: socket.socket | None = None
         self._listener_thread: threading.Thread | None = None
@@ -191,11 +200,18 @@ class FileTransferManager:
         self._remote_source_id = ID_NONE
         self._remote_drop_active = False
         self._probe_running = False
+        self._candidate_stage_running = False
         self._download_running = False
         self._upload_running = False
         self._local_destination_id = ID_NONE
         self._expected_push_id = ID_NONE
         self._expected_push_until = 0.0
+        self._drag_candidate: Path | None = None
+        self._drag_candidate_until = 0.0
+        self._drag_monitor_process: subprocess.Popen[str] | None = None
+        self._drag_monitor_thread: threading.Thread | None = None
+        self._drag_monitor_failures = 0
+        self._drop_indicator_process: subprocess.Popen[str] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -235,9 +251,13 @@ class FileTransferManager:
             daemon=True,
         )
         self._listener_thread.start()
+        if self.visual_feedback:
+            self._start_drag_monitor()
 
     def stop(self) -> None:
         self._stop.set()
+        self._stop_drag_monitor()
+        self._hide_drop_indicator()
         listener = self._listener
         self._listener = None
         if listener:
@@ -274,6 +294,9 @@ class FileTransferManager:
             self._local_destination_id = ID_NONE
             self._expected_push_id = ID_NONE
             self._expected_push_until = 0.0
+            self._drag_candidate = None
+            self._drag_candidate_until = 0.0
+            self._candidate_stage_running = False
 
     def process_packet(self, packet: Packet) -> None:
         """Advance the PowerToys drag state from one control packet."""
@@ -293,9 +316,11 @@ class FileTransferManager:
                         ID_ALL,
                     )
                 if self._remote_drop_active:
+                    self._show_drop_indicator()
                     self.status_callback("Release the mouse to receive the dragged file")
             return
         if packet.type == PackageType.CLIPBOARD_DRAG_DROP_END:
+            self._hide_drop_indicator()
             with self._lock:
                 self._remote_source_id = ID_NONE
                 self._remote_drop_active = False
@@ -338,12 +363,23 @@ class FileTransferManager:
             if not staged:
                 self._staged_file = None
                 self._staged_until = 0.0
+            candidate = (
+                self._drag_candidate
+                if self._drag_candidate is not None
+                and time.monotonic() <= self._drag_candidate_until
+                else None
+            )
+            if candidate is None:
+                self._drag_candidate = None
+                self._drag_candidate_until = 0.0
         if destination_id in (ID_NONE, ID_ALL):
             if previous_id not in (ID_NONE, ID_ALL) and staged:
                 self._send_drag_end(previous_id)
             with self._lock:
                 self._staged_file = None
                 self._staged_until = 0.0
+                self._drag_candidate = None
+                self._drag_candidate_until = 0.0
             return
         if staged:
             if previous_id != destination_id:
@@ -354,13 +390,31 @@ class FileTransferManager:
                 operation.dest = destination_id
                 self.send_packet(operation)
             return
+        if candidate is not None:
+            with self._lock:
+                self._drag_candidate = None
+                self._drag_candidate_until = 0.0
+            try:
+                self.stage_file(candidate, destination_id)
+            except (FileTransferError, OSError) as exc:
+                self.status_callback(f"File drag unavailable: {exc}")
+            return
         self._start_drag_probe()
 
     def handle_remote_mouse(self, event: int) -> None:
         """Finish a Windows-origin drag when its injected left button rises."""
 
         # Importing input here would create a cycle; this is WM_LBUTTONUP.
-        if event != 0x202 or self._stop.is_set():
+        if self._stop.is_set():
+            return
+        # PowerToys treats a right-button release as drag cancellation.
+        if event == 0x205:
+            with self._lock:
+                self._remote_source_id = ID_NONE
+                self._remote_drop_active = False
+            self._hide_drop_indicator()
+            return
+        if event != 0x202:
             return
         with self._lock:
             if (
@@ -372,6 +426,7 @@ class FileTransferManager:
             source_id = self._remote_source_id
             self._remote_drop_active = False
             self._download_running = True
+        self._hide_drop_indicator()
         thread = threading.Thread(
             target=self._download_worker,
             args=(source_id,),
@@ -405,7 +460,11 @@ class FileTransferManager:
 
     def _start_drag_probe(self) -> None:
         with self._lock:
-            if self._stop.is_set() or self._probe_running:
+            if (
+                self._stop.is_set()
+                or self._probe_running
+                or self._candidate_stage_running
+            ):
                 return
             self._probe_running = True
 
@@ -415,7 +474,11 @@ class FileTransferManager:
                 if path is not None and not self._stop.is_set():
                     with self._lock:
                         destination_id = self._local_destination_id
-                    if destination_id not in (ID_NONE, ID_ALL):
+                        already_staged = self._staged_file is not None
+                    if (
+                        destination_id not in (ID_NONE, ID_ALL)
+                        and not already_staged
+                    ):
                         self.stage_file(path, destination_id)
             except (FileTransferError, OSError) as exc:
                 self.status_callback(f"File drag unavailable: {exc}")
@@ -428,6 +491,198 @@ class FileTransferManager:
             name="mwb-drag-probe",
             daemon=True,
         ).start()
+
+    def _drag_monitor_edges(self) -> tuple[str, ...]:
+        return tuple(
+            edge
+            for edge in ("left", "right", "top", "bottom")
+            if neighbour(
+                self.config.machine_matrix,
+                self.config.two_row,
+                self.config.machine_name,
+                edge,
+                wrap=bool(self.config.other_options.get("wrap_mouse")),
+            )
+        )
+
+    def _drag_monitor_targets(self) -> list[dict[str, object]]:
+        targets: list[dict[str, object]] = []
+        for edge in self._drag_monitor_edges():
+            target: dict[str, object] = {"edge": edge}
+            if (
+                edge == self.config.host_position
+                and len(self.config.host_zone) == 4
+                and self.config.host_zone[2] > 0
+                and self.config.host_zone[3] > 0
+            ):
+                target["zone"] = list(self.config.host_zone)
+            targets.append(target)
+        return targets
+
+    def _start_drag_monitor(self) -> None:
+        if (
+            self._stop.is_set()
+            or not os.environ.get("DISPLAY")
+            or self._drag_monitor_process is not None
+        ):
+            return
+        edges = self._drag_monitor_edges()
+        if not edges:
+            return
+        environment = background_environment()
+        environment["GDK_BACKEND"] = "x11"
+        environment["MWB_DRAG_MONITOR_EDGES"] = ",".join(edges)
+        environment["MWB_DRAG_MONITOR_TARGETS"] = json.dumps(
+            self._drag_monitor_targets(), separators=(",", ":")
+        )
+        try:
+            process = subprocess.Popen(
+                _helper_command("_drag-monitor"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env=environment,
+            )
+        except OSError as exc:
+            LOGGER.warning("could not start the Linux drag edge monitor: %s", exc)
+            return
+        self._drag_monitor_process = process
+        started_at = time.monotonic()
+
+        def read_candidates() -> None:
+            stream = process.stdout
+            if stream is None:
+                return
+            try:
+                for line in stream:
+                    if self._stop.is_set():
+                        break
+                    try:
+                        value = json.loads(line)
+                        event = value.get("event") if isinstance(value, dict) else None
+                        path_value = value.get("path") if isinstance(value, dict) else None
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if event == "drag" and isinstance(path_value, str):
+                        self._record_drag_candidate(Path(path_value))
+                    elif event == "leave":
+                        self._record_drag_leave()
+            finally:
+                stream.close()
+                with self._lock:
+                    if time.monotonic() - started_at >= 5.0:
+                        self._drag_monitor_failures = 1
+                    else:
+                        self._drag_monitor_failures += 1
+                    should_restart = (
+                        not self._stop.is_set()
+                        and self._drag_monitor_process is process
+                        and self._drag_monitor_failures <= 3
+                    )
+                    if self._drag_monitor_process is process:
+                        self._drag_monitor_process = None
+                if should_restart:
+                    LOGGER.warning("Linux drag edge monitor exited; restarting it")
+                    time.sleep(0.5 * (2 ** (self._drag_monitor_failures - 1)))
+                    self._start_drag_monitor()
+                elif not self._stop.is_set():
+                    LOGGER.error(
+                        "Linux drag edge monitor repeatedly failed; reconnect to retry"
+                    )
+
+        self._drag_monitor_thread = threading.Thread(
+            target=read_candidates,
+            name="mwb-drag-monitor",
+            daemon=True,
+        )
+        self._drag_monitor_thread.start()
+
+    def _stop_drag_monitor(self) -> None:
+        process = self._drag_monitor_process
+        self._drag_monitor_process = None
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        thread = self._drag_monitor_thread
+        self._drag_monitor_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+    def _record_drag_candidate(self, path: Path) -> None:
+        try:
+            path = path.expanduser().resolve()
+        except OSError:
+            return
+        if not path.is_file() or self._stop.is_set():
+            return
+        with self._lock:
+            self._drag_candidate = path
+            self._drag_candidate_until = time.monotonic() + DRAG_CANDIDATE_LIFETIME
+            destination_id = self._local_destination_id
+            already_staged = self._staged_file is not None
+        if destination_id in (ID_NONE, ID_ALL) or already_staged:
+            return
+        # Claim the candidate under the same lock used by ``control_changed``.
+        # The edge event and portal activation can arrive on different threads
+        # only a few microseconds apart; exactly one of them may stage the file.
+        with self._lock:
+            if self._drag_candidate != path:
+                return
+            self._drag_candidate = None
+            self._drag_candidate_until = 0.0
+            self._candidate_stage_running = True
+        try:
+            self.stage_file(path, destination_id)
+        except (FileTransferError, OSError) as exc:
+            self.status_callback(f"File drag unavailable: {exc}")
+        finally:
+            with self._lock:
+                self._candidate_stage_running = False
+
+    def _record_drag_leave(self) -> None:
+        """Keep a brief crossing grace period, then discard a cancelled drag."""
+
+        with self._lock:
+            if self._drag_candidate is not None:
+                self._drag_candidate_until = min(
+                    self._drag_candidate_until,
+                    time.monotonic() + DRAG_LEAVE_GRACE,
+                )
+
+    def _show_drop_indicator(self) -> None:
+        if not self.visual_feedback or not os.environ.get("DISPLAY"):
+            return
+        process = self._drop_indicator_process
+        if process is not None and process.poll() is None:
+            return
+        environment = background_environment()
+        environment["GDK_BACKEND"] = "x11"
+        try:
+            self._drop_indicator_process = subprocess.Popen(
+                _helper_command("_drop-indicator"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=environment,
+            )
+        except OSError as exc:
+            LOGGER.debug("could not show the file drop animation: %s", exc)
+
+    def _hide_drop_indicator(self) -> None:
+        process = self._drop_indicator_process
+        self._drop_indicator_process = None
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
 
     def _send_drag_end(self, destination_id: int) -> None:
         packet = Packet()
