@@ -34,6 +34,9 @@ WM_XBUTTONUP = 0x20C
 WM_MOUSEHWHEEL = 0x20E
 CONTROLLED_EDGE_THRESHOLD = 128
 EDGE_ENTRY_OFFSET = 800
+# Ubuntu Dock defaults to a 100px pressure threshold. One injected frame must
+# cross it because Windows may send only one clamped coordinate at the edge.
+EDGE_PRESSURE_DISTANCE = 128.0
 
 BUTTON_TO_WM = {
     (272, True): WM_LBUTTONDOWN,
@@ -125,11 +128,14 @@ def portal_environment() -> dict[str, str]:
     module_root = Path(__file__).resolve().parents[1]
     installed_root = Path("/usr/lib/powertoys-mouse-without-borders")
     appdir = os.environ.get("APPDIR")
+    appimage_desktop_file = None
     if appdir:
-        desktop_file = (
+        appimage_desktop_file = (
             Path(appdir)
             / "usr/share/applications/io.github.NaveDanan.MouseWithoutBorders.desktop"
         )
+    if appimage_desktop_file and appimage_desktop_file.is_file():
+        desktop_file = appimage_desktop_file
     elif module_root.is_relative_to(installed_root):
         desktop_file = Path(
             "/usr/share/applications/io.github.NaveDanan.MouseWithoutBorders.desktop"
@@ -297,6 +303,7 @@ class InputManager:
         peer_name: Callable[[int], str | None] | None = None,
         wake_peer: Callable[[str], bool] | None = None,
         bridge: PortalBridge | None = None,
+        control_changed: Callable[[int | None], None] | None = None,
     ) -> None:
         self.config = config
         self.send_packet = send_packet
@@ -305,6 +312,7 @@ class InputManager:
         self.persist_config = persist_config or (lambda: None)
         self._peer_name_lookup = peer_name or (lambda _machine_id: None)
         self._wake_peer = wake_peer or (lambda _machine_name: False)
+        self._control_changed = control_changed or (lambda _machine_id: None)
         self.bridge = bridge or PortalBridge(self._bridge_event)
         self.remote_active = False
         self.width = 1920
@@ -377,6 +385,10 @@ class InputManager:
             self._capture_enabled = False
             self.status_callback("Portal permission requested")
         except (FileNotFoundError, OSError, ConnectionError) as exc:
+            try:
+                self.bridge.stop()
+            except Exception:
+                LOGGER.debug("could not clean up failed portal initialization", exc_info=True)
             self._started = False
             self.status_callback(f"Input unavailable: {exc}")
             LOGGER.warning("input portal unavailable: %s", exc)
@@ -524,6 +536,7 @@ class InputManager:
             self.y = 800
         else:
             self.y = 65535 - 800
+        self._control_changed(self._peer_id(self.active_remote_name))
         # Capture is activated by crossing the compositor-owned barrier. There
         # is intentionally no portal API that force-grabs global input.
         self.status_callback(f"Controlling {self.active_remote_name}")
@@ -609,6 +622,7 @@ class InputManager:
         if not self.remote_active:
             return
         self.remote_active = False
+        self._control_changed(None)
         for code in list(self._keys_down):
             self._send_key(code, False)
         self._keys_down.clear()
@@ -725,13 +739,17 @@ class InputManager:
 
         def restart() -> None:
             try:
-                time.sleep(1)
-                if not self._desired:
-                    return
-                self.bridge.stop()
-                self._started = False
-                self._capture_ready = False
-                self.start()
+                for attempt in range(5):
+                    time.sleep(min(1 + attempt, 5))
+                    if not self._desired:
+                        return
+                    self.bridge.stop()
+                    self._started = False
+                    self._capture_ready = False
+                    self.start()
+                    if self._started:
+                        return
+                self.status_callback("Input unavailable after resume; reconnect to retry")
             finally:
                 with self._restart_lock:
                     self._restart_scheduled = False
@@ -739,6 +757,15 @@ class InputManager:
         threading.Thread(
             target=restart, name="mwb-portal-restart", daemon=True
         ).start()
+
+    def resume_after_suspend(self) -> None:
+        """Recreate compositor sessions after a forced system suspend."""
+
+        if not self._desired:
+            return
+        self.release_local()
+        self.status_callback("System resumed; restoring remote input permission")
+        self._schedule_bridge_restart()
 
     def _send_key(self, code: int, pressed: bool) -> None:
         mapped = evdev_to_windows(code, pressed)
@@ -823,6 +850,7 @@ class InputManager:
             self.y = 65535 - EDGE_ENTRY_OFFSET
         else:
             self.x = self.y = 32768
+        self._control_changed(self._peer_id(machine_name))
         self._send_mouse(WM_MOUSEMOVE, 0)
         self.status_callback(f"Controlling {machine_name}")
 
@@ -879,6 +907,7 @@ class InputManager:
                     x=_mwb_to_eis_coordinate(x, self.inject_x, self.inject_width),
                     y=_mwb_to_eis_coordinate(y, self.inject_y, self.inject_height),
                 )
+                self._push_controlled_desktop_edge(x, y)
                 self._route_controlled_edge(x, y, source_id)
             elif event in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
                 self.bridge.command(
@@ -901,6 +930,48 @@ class InputManager:
                     )
         except ConnectionError as exc:
             LOGGER.warning("pointer injection unavailable: %s", exc)
+
+    def _push_controlled_desktop_edge(self, x: int, y: int) -> None:
+        """Apply relative pressure so GNOME reveals an auto-hidden edge UI.
+
+        An absolute EIS event can reach the final pixel but cannot move beyond
+        it.  GNOME Shell's pressure barriers (including Ubuntu Dock) require
+        that outward relative motion.  Never push an edge occupied by another
+        matrix computer because that edge belongs to machine switching.
+        """
+
+        dx = dy = 0.0
+        if x <= CONTROLLED_EDGE_THRESHOLD:
+            if not self._edge_has_matrix_neighbour("left"):
+                dx = -EDGE_PRESSURE_DISTANCE
+        elif x >= 65535 - CONTROLLED_EDGE_THRESHOLD:
+            if not self._edge_has_matrix_neighbour("right"):
+                dx = EDGE_PRESSURE_DISTANCE
+        if y <= CONTROLLED_EDGE_THRESHOLD:
+            if not self._edge_has_matrix_neighbour("top"):
+                dy = -EDGE_PRESSURE_DISTANCE
+        elif y >= 65535 - CONTROLLED_EDGE_THRESHOLD:
+            if not self._edge_has_matrix_neighbour("bottom"):
+                dy = EDGE_PRESSURE_DISTANCE
+        if not dx and not dy:
+            return
+        try:
+            self.bridge.command("inject_pointer_motion", dx=dx, dy=dy)
+        except ConnectionError as exc:
+            # Absolute injection and reverse edge routing must continue on a
+            # portal backend that exposes no relative pointer device.
+            LOGGER.debug("desktop edge pressure unavailable: %s", exc)
+
+    def _edge_has_matrix_neighbour(self, edge: str) -> bool:
+        return bool(
+            neighbour(
+                self.config.machine_matrix,
+                self.config.two_row,
+                self.config.machine_name,
+                edge,
+                wrap=bool(self.config.other_options.get("wrap_mouse")),
+            )
+        )
 
     def _route_controlled_edge(self, x: int, y: int, source_id: int) -> None:
         """Tell a Windows controller when its pointer leaves the Linux tile."""

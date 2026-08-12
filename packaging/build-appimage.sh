@@ -45,6 +45,7 @@ python3 -m PyInstaller \
     --add-data "$LINUX_DIR/mwb_linux/icons:mwb_linux/icons" \
     --hidden-import gi.repository.Adw \
     --hidden-import gi.repository.Gdk \
+    --hidden-import gi.repository.GdkX11 \
     --hidden-import gi.repository.GdkPixbuf \
     --hidden-import gi.repository.Gio \
     --hidden-import gi.repository.GLib \

@@ -336,11 +336,13 @@ class ConnectionManager:
         packet_callback: Callable[[PeerConnection, Packet], None],
         status_callback: Callable[[str, str], None],
         persist_peer_mac: Callable[[str, str], None] | None = None,
+        resume_callback: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self.packet_callback = packet_callback
         self.status_callback = status_callback
         self.persist_peer_mac = persist_peer_mac or (lambda _name, _mac: None)
+        self.resume_callback = resume_callback or (lambda: None)
         self._connections: list[PeerConnection] = []
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -450,6 +452,25 @@ class ConnectionManager:
         for peer in self.peers:
             if peer.machine_id == machine_id:
                 return peer.name
+        return None
+
+    def transfer_peer(
+        self, *, machine_id: int | None = None, address: str = ""
+    ) -> PeerInfo | None:
+        """Return the live identity/profile for a secondary file connection."""
+
+        wanted_addresses = (
+            self._numeric_addresses(address, resolve=False) if address else set()
+        )
+        for connection in self.connections:
+            if machine_id is not None and connection.info.machine_id != machine_id:
+                continue
+            if wanted_addresses and not (
+                wanted_addresses
+                & self._numeric_addresses(connection.info.address, resolve=False)
+            ):
+                continue
+            return connection.info
         return None
 
     def start(self) -> None:
@@ -693,15 +714,15 @@ class ConnectionManager:
                 thread.start()
 
     def _authenticate_incoming(self, incoming: socket.socket) -> None:
-        address = str(incoming.getpeername()[0])
-        target = self._target_for_peer_address(address)
-        profile = self._profiles(target.name if target else "")[0]
         connection: PeerConnection | None = None
         registered = False
         try:
             if self._stop.is_set():
                 incoming.close()
                 return
+            address = str(incoming.getpeername()[0])
+            target = self._target_for_peer_address(address)
+            profile = self._profiles(target.name if target else "")[0]
             incoming.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             configure_tcp_liveness(incoming)
             connection = PeerConnection(
@@ -915,6 +936,10 @@ class ConnectionManager:
         self._retry_after.clear()
         self._retry_delay.clear()
         self._reconnect.set()
+        try:
+            self.resume_callback()
+        except Exception as exc:
+            LOGGER.warning("desktop resume callback failed: %s", exc)
         self.status_callback("connecting", "System resumed; rebuilding connections")
 
     def reconnect(self) -> None:

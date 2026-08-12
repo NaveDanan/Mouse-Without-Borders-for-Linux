@@ -98,10 +98,12 @@ class ConnectionTests(unittest.TestCase):
 
     def test_resume_discards_stale_sockets_and_retries_immediately(self):
         statuses = []
+        resumed = Mock()
         manager = ConnectionManager(
             Config(),
             lambda *_: None,
             lambda state, message: statuses.append((state, message)),
+            resume_callback=resumed,
         )
         connection = Mock(trusted=True)
         connection.info = PeerInfo(name="windows", machine_id=20)
@@ -116,6 +118,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertFalse(manager._authentication_failed)
         self.assertFalse(manager._retry_after)
         self.assertTrue(manager._reconnect.is_set())
+        resumed.assert_called_once_with()
         self.assertEqual(statuses[-1], ("connecting", "System resumed; rebuilding connections"))
 
     def test_connection_worker_detects_a_boottime_suspend_jump(self):
@@ -391,6 +394,16 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(result, [False])
         connection.start.assert_not_called()
         connection.close.assert_called_with(notify=False)
+        self.assertFalse(manager.connections)
+
+    def test_incoming_socket_closed_before_authentication_exits_cleanly(self):
+        manager = ConnectionManager(Config(), lambda *_: None, lambda *_: None)
+        incoming, peer = socket.socketpair()
+        incoming.close()
+        peer.close()
+
+        manager._authenticate_incoming(incoming)
+
         self.assertFalse(manager.connections)
 
     def test_vertical_matrix_uses_two_rows(self):

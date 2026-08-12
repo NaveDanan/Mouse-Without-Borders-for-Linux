@@ -8,8 +8,9 @@ the familiar Mouse Without Borders GUI and connection workflow.
 The application speaks the Windows program's native encrypted TCP protocol and
 provides a GTK 4 rebuild of the classic settings form, a per-user background
 service, rootless Wayland input through XDG Desktop Portal and EIS, text/PNG
-clipboard sharing, screen-edge switching, management commands, and DEB, RPM,
-and AppImage packages for x86-64 and ARM64.
+clipboard sharing, encrypted cross-screen file drag-and-drop, screen-edge
+switching, management commands, and DEB, RPM, and AppImage packages for x86-64
+and ARM64.
 
 > [!IMPORTANT]
 > This is an independent community project. It is not an official Microsoft or
@@ -30,29 +31,29 @@ page. The release provides these files:
 
 | Distribution | x86-64 | ARM64 |
 | --- | --- | --- |
-| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.2_amd64.deb` | `powertoys-mouse-without-borders_0.5.2_arm64.deb` |
-| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.2-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.2-1.aarch64.rpm` |
-| Portable AppImage | `Mouse-Without-Borders-0.5.2-x86_64.AppImage` | `Mouse-Without-Borders-0.5.2-aarch64.AppImage` |
+| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.3_amd64.deb` | `powertoys-mouse-without-borders_0.5.3_arm64.deb` |
+| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.3-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.3-1.aarch64.rpm` |
+| Portable AppImage | `Mouse-Without-Borders-0.5.3-x86_64.AppImage` | `Mouse-Without-Borders-0.5.3-aarch64.AppImage` |
 
 Debian or Ubuntu:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.5.2_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.5.3_amd64.deb
 powertoys-mouse-without-borders
 ```
 
 Fedora or another RPM-based distribution:
 
 ```sh
-sudo dnf install ./powertoys-mouse-without-borders-0.5.2-1.x86_64.rpm
+sudo dnf install ./powertoys-mouse-without-borders-0.5.3-1.x86_64.rpm
 powertoys-mouse-without-borders
 ```
 
 Portable AppImage:
 
 ```sh
-chmod +x Mouse-Without-Borders-0.5.2-x86_64.AppImage
-./Mouse-Without-Borders-0.5.2-x86_64.AppImage
+chmod +x Mouse-Without-Borders-0.5.3-x86_64.AppImage
+./Mouse-Without-Borders-0.5.3-x86_64.AppImage
 ```
 
 Replace `amd64`/`x86_64` with `arm64`/`aarch64` on an ARM64 computer. The
@@ -95,7 +96,7 @@ APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
 Packages are written to `dist/`. Install a local DEB build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.5.2_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.5.3_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -157,6 +158,22 @@ Disconnect, and Reconnect. Options with no Linux equivalent yet (for example
 Disable CAD) are stored so the form round-trips, and take effect as the matching
 feature lands.
 
+With **Transfer file** checked, one regular file can be dragged through a
+configured matrix edge in either direction between Linux and Windows. The file
+contents use Mouse Without Borders' separate encrypted base-port connection;
+the control connection authenticates the machine identity and encryption
+profile before that socket is accepted. Files arriving on Linux are written
+atomically without overwriting an existing file under
+`Desktop/MouseWithoutBorders`. Mouse Without Borders' native protocol supports
+one file per drag and does not transfer directories; zip a folder before
+dragging it.
+
+Absolute remote pointer coordinates alone cannot activate GNOME Shell pressure
+barriers. On a desktop edge that is not assigned to another matrix computer,
+the Linux client adds outward relative pressure so an auto-hidden Ubuntu Dock
+or other edge UI reveals normally. Matrix switching keeps priority on occupied
+edges.
+
 After a peer connects, the service remembers its LAN adapter address. Switching
 to an offline peer sends Wake-on-LAN and completes the switch after reconnection;
 switching to a connected locked peer sends the native Mouse Without Borders
@@ -164,9 +181,21 @@ awake packet before input. Wake-on-LAN must be enabled in the sleeping PC's
 firmware, network-adapter settings, and operating system, and both machines must
 be reachable on the same broadcast LAN.
 
+When **Block Screen Saver on other machines** is checked, an authenticated
+connection holds a logind sleep inhibitor on Linux. The display may still blank
+or lock, and incoming mouse, keyboard, or awake packets signal desktop user
+activity to wake the display, but the daemon and its TCP/EIS sessions remain
+available. This is necessary because a fully suspended userspace process cannot
+receive the mouse packet intended to wake it and stock Windows Mouse Without
+Borders does not send a Linux Wake-on-LAN packet. If the system is forcibly
+suspended anyway, stale sockets are discarded on resume, connections retry
+immediately, and portal input sessions are rebuilt with their saved permission
+tokens. Uncheck the option when normal automatic system suspend is preferred.
+
 Base TCP port and encryption compatibility live at the bottom of the IP
 Mappings tab; the mapping table itself resolves a machine name to an address
-before DNS is consulted.
+before DNS is consulted. A host firewall must allow both the configured base
+port for file data and `base + 1` for control traffic on the trusted LAN.
 
 The key is not accepted as a command-line argument. The UI or
 `configure --secret-stdin` writes it to a mode-`0600` file under

@@ -156,8 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["_drag-capture"]:
+        from .drag_capture import main as drag_capture_main
+
+        return drag_capture_main()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if args.command in (None, "ui"):
         from .ui import run_ui
 

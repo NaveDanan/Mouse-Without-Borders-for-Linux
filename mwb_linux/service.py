@@ -24,8 +24,10 @@ from .config import (
     default_runtime_socket,
 )
 from .connection import ConnectionManager, PeerConnection
+from .file_transfer import FileTransferManager, TransferPeer
 from .input import InputManager, capture_targets
 from .protocol import ID_ALL, Packet, PackageType
+from .power import PowerManager
 from .shortcuts import apply_gnome_shortcuts
 
 LOGGER = logging.getLogger(__name__)
@@ -57,7 +59,9 @@ class MouseWithoutBordersService:
         self.config = Config.load(self.config_path)
         self.connection: ConnectionManager | None = None
         self.clipboard: ClipboardManager | None = None
+        self.file_transfer: FileTransferManager | None = None
         self.input: InputManager | None = None
+        self.power: PowerManager | None = None
         self._stop = threading.Event()
         self._shutdown_lock = threading.Lock()
         self._shutdown_complete = False
@@ -141,10 +145,21 @@ class MouseWithoutBordersService:
                 self._process_packet,
                 self._connection_status,
                 self._persist_peer_mac,
+                self._resume_after_suspend,
             )
+        if self.power is None:
+            self.power = PowerManager()
         if self.clipboard is None and self.config.share_clipboard:
             self.clipboard = ClipboardManager(
                 self._broadcast, share_images=self.config.share_images
+            )
+        if self.file_transfer is None and self.config.share_images:
+            self.file_transfer = FileTransferManager(
+                self.config,
+                self._broadcast,
+                self._transfer_peer_by_id,
+                self._transfer_peer_by_address,
+                self._input_status,
             )
         if self.input is None:
             self.input = InputManager(
@@ -161,6 +176,11 @@ class MouseWithoutBordersService:
                 lambda name: self.connection.wake_peer(name)
                 if self.connection
                 else False,
+                control_changed=lambda machine_id: self.file_transfer.control_changed(
+                    machine_id
+                )
+                if self.file_transfer
+                else None,
             )
         else:
             self.input.config = self.config
@@ -187,6 +207,18 @@ class MouseWithoutBordersService:
                     self._input_status(f"Clipboard unavailable: {exc}")
             if self.input:
                 self.input.start()
+            if self.file_transfer:
+                try:
+                    self.file_transfer.start()
+                except OSError as exc:
+                    self._input_status(f"File transfer unavailable: {exc}")
+            if self.power:
+                self.power.set_connected(
+                    True,
+                    block_sleep=bool(
+                        self.config.other_options.get("block_screen_saver", True)
+                    ),
+                )
 
     def _stop_connection(self) -> None:
         if self.connection:
@@ -200,6 +232,12 @@ class MouseWithoutBordersService:
         if self.clipboard:
             self.clipboard.stop()
             self.clipboard = None
+        if self.file_transfer:
+            self.file_transfer.stop()
+            self.file_transfer = None
+        if self.power:
+            self.power.stop()
+            self.power = None
 
     def _stop_components(self) -> None:
         self._stop_features()
@@ -227,6 +265,9 @@ class MouseWithoutBordersService:
         # key-up events, then replace the sockets and listener.
         if self.input:
             self.input.release_local()
+        if self.file_transfer:
+            self.file_transfer.stop()
+            self.file_transfer = None
         self._stop_connection()
         if (input_changed or not configured) and self.input:
             self.input.stop()
@@ -290,12 +331,18 @@ class MouseWithoutBordersService:
         elif self.connection and self.connection.connected:
             state = "connected"
             message = f"{len(self.connection.peers)} connected; {message}"
+        if self.power and not (self.connection and self.connection.connected):
+            self.power.set_connected(False)
         self._set_status(state, message)
 
     def _input_status(self, message: str) -> None:
         with self._status_lock:
             self._status["input"] = message
             self._status["updated"] = time.time()
+
+    def _resume_after_suspend(self) -> None:
+        if self.input:
+            self.input.resume_after_suspend()
 
     def _set_status(self, state: str, message: str) -> None:
         with self._status_lock:
@@ -336,6 +383,10 @@ class MouseWithoutBordersService:
                 "peers": [asdict(item) for item in peers],
                 "remote_active": bool(self.input and self.input.remote_active),
                 "active_remote_name": self.input.active_remote_name if self.input else "",
+                "file_transfer_listening": bool(
+                    self.file_transfer and self.file_transfer.listening
+                ),
+                "sleep_inhibited": bool(self.power and self.power.sleep_inhibited),
                 "ui_exited": self._ui_exited,
             }
         )
@@ -351,11 +402,27 @@ class MouseWithoutBordersService:
                 return
             self._recent_packet_ids.append(identity)
         if packet.type in (
+            PackageType.CLIPBOARD_DRAG_DROP,
+            PackageType.CLIPBOARD_DRAG_DROP_OPERATION,
+            PackageType.CLIPBOARD_DRAG_DROP_END,
+            PackageType.EXPLORER_DRAG_DROP,
+            PackageType.CLIPBOARD_ASK,
+        ):
+            if self.file_transfer:
+                self.file_transfer.process_packet(packet)
+            return
+        if packet.type in (
             PackageType.HEARTBEAT,
             PackageType.HEARTBEAT_EX,
             PackageType.AWAKE,
             PackageType.HELLO,
         ):
+            if (
+                self.power
+                and packet.type == PackageType.AWAKE
+                and packet.dest in (self.config.machine_id, ID_ALL)
+            ):
+                self.power.remote_activity()
             if packet.machine_name:
                 peer.info.name = packet.machine_name
             if packet.src not in (0, ID_ALL):
@@ -367,6 +434,8 @@ class MouseWithoutBordersService:
             self.config.machine_id,
             ID_ALL,
         ):
+            if self.power:
+                self.power.remote_activity()
             if self.input:
                 self.input.inject_keyboard(*packet.keyboard)
             return
@@ -374,8 +443,12 @@ class MouseWithoutBordersService:
             self.config.machine_id,
             ID_ALL,
         ):
+            if self.power:
+                self.power.remote_activity()
             if self.input:
                 self.input.inject_mouse(*packet.mouse, source_id=packet.src)
+            if self.file_transfer:
+                self.file_transfer.handle_remote_mouse(packet.mouse[3])
             return
         if packet.type == PackageType.NEXT_MACHINE and packet.dest in (
             self.config.machine_id,
@@ -424,6 +497,10 @@ class MouseWithoutBordersService:
         self._connection_requested = False
         if self.input:
             self.input.release_local()
+        if self.file_transfer:
+            self.file_transfer.stop()
+        if self.power:
+            self.power.set_connected(False)
         self._stop_connection()
         self._set_status("disconnected", "Disconnected")
 
@@ -443,7 +520,36 @@ class MouseWithoutBordersService:
         if self.clipboard:
             self.clipboard.stop()
             self.clipboard = None
+        if self.file_transfer:
+            self.file_transfer.stop()
+            self.file_transfer = None
+        if self.power:
+            self.power.set_connected(False)
         self._set_status("dormant", "Exited; mouse and keyboard sharing stopped")
+
+    def _transfer_peer_by_id(self, machine_id: int) -> TransferPeer | None:
+        info = (
+            self.connection.transfer_peer(machine_id=machine_id)
+            if self.connection
+            else None
+        )
+        return (
+            TransferPeer(info.name, info.machine_id, info.address, info.profile)
+            if info
+            else None
+        )
+
+    def _transfer_peer_by_address(self, address: str) -> TransferPeer | None:
+        info = (
+            self.connection.transfer_peer(address=address)
+            if self.connection
+            else None
+        )
+        return (
+            TransferPeer(info.name, info.machine_id, info.address, info.profile)
+            if info
+            else None
+        )
 
     def resume_ui(self) -> None:
         """Resume only a service deliberately parked by the top-bar Exit."""

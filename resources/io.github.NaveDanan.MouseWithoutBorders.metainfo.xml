@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.NaveDanan.MouseWithoutBorders</id>
   <name>Mouse Without Borders</name>
-  <summary>Share input and clipboard across Linux and Windows PCs</summary>
+  <summary>Share input, clipboard, and files across Linux and Windows PCs</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <developer id="io.github.navedanan">
@@ -14,8 +14,8 @@
     <p>
       An independent Linux implementation and adaptation of PowerToys Mouse
       Without Borders. It connects Linux and Windows PCs using
-      the native encrypted protocol and shares keyboard, pointer, text
-      clipboard, and PNG clipboard input.
+      the native encrypted protocol and shares keyboard, pointer, text and PNG
+      clipboard input, and cross-screen file drag-and-drop.
     </p>
     <p>
       Wayland input uses the desktop InputCapture and RemoteDesktop portals,
@@ -28,6 +28,16 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.3" date="2026-08-12">
+      <description>
+        <p>
+          Add encrypted cross-screen file drag-and-drop in both directions,
+          reveal auto-hidden Linux docks from remotely controlled pointers,
+          and keep connected Linux sessions available for remote wake with
+          forced-suspend reconnection and portal recovery.
+        </p>
+      </description>
+    </release>
     <release version="0.5.2" date="2026-08-07">
       <description>
         <p>

@@ -97,6 +97,62 @@ class ServiceTests(unittest.TestCase):
                 1, 2, 3, 0x200, source_id=200
             )
 
+    def test_remote_mouse_wakes_display_and_completes_file_drop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                machine_name="linux",
+                machine_id=100,
+                auto_connect=False,
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock()
+            service.power = Mock()
+            service.file_transfer = Mock()
+            packet = Packet()
+            packet.type = PackageType.MOUSE
+            packet.src = 200
+            packet.dest = 100
+            packet.mouse = (10, 20, 0, 0x202)
+
+            service._process_packet(Mock(), packet)
+
+            service.power.remote_activity.assert_called_once_with()
+            service.file_transfer.handle_remote_mouse.assert_called_once_with(0x202)
+
+    def test_drag_control_packets_are_forwarded_to_file_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.file_transfer = Mock()
+            packet = Packet()
+            packet.type = PackageType.EXPLORER_DRAG_DROP
+            packet.src = 200
+            packet.dest = service.config.machine_id
+
+            service._process_packet(Mock(), packet)
+
+            service.file_transfer.process_packet.assert_called_once_with(packet)
+
+            packet.type = PackageType.CLIPBOARD_ASK
+            packet.packet_id = 0
+            service._process_packet(Mock(), packet)
+            self.assertEqual(service.file_transfer.process_packet.call_count, 2)
+
+    def test_suspend_resume_rebuilds_the_portal_input_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock()
+
+            service._resume_after_suspend()
+
+            service.input.resume_after_suspend.assert_called_once_with()
+
     def test_next_machine_packet_is_forwarded_to_linux_controller(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"

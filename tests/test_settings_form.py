@@ -493,7 +493,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, None, True, True)
 
-        form.update_status.set_text.assert_called_once_with("Up to date (0.5.2)")
+        form.update_status.set_text.assert_called_once_with("Up to date (0.5.3)")
 
     def test_new_version_is_announced_once(self):
         form = SimpleNamespace(
@@ -518,7 +518,7 @@ class UpdateUiTests(unittest.TestCase):
 
         form.present.assert_called_once_with()
         detail = dialog.set_detail.call_args.args[0]
-        self.assertIn("Current version: 0.5.2", detail)
+        self.assertIn("Current version: 0.5.3", detail)
         self.assertIn("Latest version: 0.6.0", detail)
         dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
 

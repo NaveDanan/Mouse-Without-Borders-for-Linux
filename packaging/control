@@ -9,5 +9,6 @@ Recommends: xdg-desktop-portal-gnome (>= 46)
 Homepage: https://github.com/NaveDanan/Mouse-Without-Borders-for-Linux
 Description: Mouse Without Borders Linux companion
  Connect Debian-based Linux and Windows PCs through the Mouse Without Borders
- protocol and share keyboard, pointer, text/PNG clipboard data, and shortcuts.
- Wayland input uses the rootless desktop portals and EIS protocol.
+ protocol and share keyboard, pointer, text/PNG clipboard data, encrypted file
+ drag-and-drop, and shortcuts. Wayland input uses rootless desktop portals and
+ the EIS protocol.

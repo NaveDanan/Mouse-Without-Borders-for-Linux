@@ -292,6 +292,22 @@ class InputTests(unittest.TestCase):
         self.assertEqual(packets[1].mouse[3], WM_MOUSEMOVE)
         self.assertEqual(packets[2].mouse[3], WM_LBUTTONDOWN)
 
+    def test_linux_control_transitions_notify_file_drag_manager(self):
+        changes = []
+        manager = InputManager(
+            Config(machine_name="linux", machine_id=10),
+            lambda _packet: None,
+            lambda: 20,
+            lambda _message: None,
+            bridge=FakeBridge(),
+            control_changed=changes.append,
+        )
+
+        manager._activate_remote()
+        manager.release_local()
+
+        self.assertEqual(changes, [20, None])
+
     def test_remote_input_becomes_portal_commands(self):
         bridge = FakeBridge()
         manager = InputManager(
@@ -331,7 +347,49 @@ class InputTests(unittest.TestCase):
         windows_bottom_row = 1079 * 65535 // 1080
         manager.inject_mouse(0, windows_bottom_row, 0, WM_MOUSEMOVE)
 
-        self.assertEqual(bridge.commands[-1][1]["y"], 1079.0)
+        absolute = [command for command in bridge.commands if command[0] == "inject_pointer_absolute"][-1]
+        self.assertEqual(absolute[1]["y"], 1079.0)
+
+    def test_remote_pointer_pushes_an_unoccupied_edge_for_auto_hidden_dock(self):
+        bridge = FakeBridge()
+        manager = InputManager(
+            Config(
+                machine_name="linux",
+                machine_id=10,
+                remote_machines=[{"name": "windows", "address": "10.0.0.2"}],
+                machine_matrix=["linux", "windows", "", ""],
+            ),
+            lambda _packet: None,
+            lambda name=None: 20 if name == "windows" else None,
+            lambda _message: None,
+            peer_name=lambda machine_id: "windows" if machine_id == 20 else None,
+            bridge=bridge,
+        )
+
+        # Bottom has no matrix neighbour, so motion continues past the final
+        # absolute pixel and activates GNOME Shell's pressure barrier.
+        manager.inject_mouse(32768, 65535, 0, WM_MOUSEMOVE, source_id=20)
+        self.assertEqual(
+            [command for command in bridge.commands if command[0] == "inject_pointer_motion"],
+            [("inject_pointer_motion", {"dx": 0.0, "dy": 128.0})],
+        )
+
+        # Right belongs to the Windows tile and must remain a machine-switch
+        # edge rather than revealing desktop chrome.
+        bridge.commands.clear()
+        manager.inject_mouse(65535, 32768, 0, WM_MOUSEMOVE, source_id=20)
+        self.assertNotIn(
+            "inject_pointer_motion", [command[0] for command in bridge.commands]
+        )
+
+        # At a corner, the occupied right edge must not suppress pressure on
+        # the unoccupied bottom dock edge.
+        bridge.commands.clear()
+        manager.inject_mouse(65535, 65535, 0, WM_MOUSEMOVE, source_id=20)
+        self.assertEqual(
+            [command for command in bridge.commands if command[0] == "inject_pointer_motion"],
+            [("inject_pointer_motion", {"dx": 0.0, "dy": 128.0})],
+        )
 
     def test_remote_pointer_endpoints_stay_inside_offset_eis_region(self):
         bridge = FakeBridge()
@@ -353,13 +411,17 @@ class InputTests(unittest.TestCase):
 
         manager.inject_mouse(65535, 65535, 0, WM_MOUSEMOVE)
 
-        command, values = bridge.commands[-1]
+        command, values = [
+            item for item in bridge.commands if item[0] == "inject_pointer_absolute"
+        ][-1]
         self.assertEqual(command, "inject_pointer_absolute")
         self.assertEqual(values["x"], 4479.0)
         self.assertEqual(values["y"], 1559.0)
 
         manager.inject_mouse(32768, 32768, 0, WM_MOUSEMOVE)
-        values = bridge.commands[-1][1]
+        values = [
+            item for item in bridge.commands if item[0] == "inject_pointer_absolute"
+        ][-1][1]
         self.assertEqual(values["x"], 3200.0)
         self.assertEqual(values["y"], 840.0)
 
@@ -387,7 +449,9 @@ class InputTests(unittest.TestCase):
 
         manager.inject_mouse(65535, 65535, 0, WM_MOUSEMOVE)
 
-        command, values = bridge.commands[-1]
+        command, values = [
+            item for item in bridge.commands if item[0] == "inject_pointer_absolute"
+        ][-1]
         self.assertEqual(command, "inject_pointer_absolute")
         self.assertEqual(values["x"], 4479.0)
         self.assertEqual(values["y"], 1439.0)

@@ -26,7 +26,8 @@ Recommends:     xdg-desktop-portal-gnome
 %description
 An independent Linux implementation of Mouse Without Borders. It uses the
 native encrypted Windows protocol and rootless Wayland desktop portals to share
-mouse, keyboard, and clipboard input between Linux and Windows computers.
+mouse, keyboard, clipboard input, and file drag-and-drop between Linux and
+Windows computers.
 
 %prep
 %setup -q
@@ -83,6 +84,9 @@ install -m 0644 THIRD-PARTY-NOTICES.md \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg
 
 %changelog
+* Wed Aug 12 2026 Nave Danan <nave0712@gmail.com> - 0.5.3-1
+- Add encrypted file drag-and-drop, remote dock reveal, and Linux wake continuity.
+
 * Fri Aug 07 2026 Nave Danan <nave0712@gmail.com> - 0.5.2-1
 - Add RPM and AppImage releases for x86_64 and aarch64.
 - Make top-bar Exit fully and safely shut down every component.
