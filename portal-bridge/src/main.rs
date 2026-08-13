@@ -46,7 +46,7 @@ impl Bridge {
                 targets,
                 ..
             } => {
-                if self.capture.is_some() {
+                if !self.discard_dead_capture() {
                     return Err(anyhow!("input capture is already initialized"));
                 }
                 let targets = capture_target_specs(edge, zone, targets)?;
@@ -90,7 +90,7 @@ impl Bridge {
                 Ok((json!({ "stopped": true }), false))
             }
             Command::InjectInit { restore_token, .. } => {
-                if self.injection.is_some() {
+                if !self.discard_dead_injection() {
                     return Err(anyhow!("input injection is already initialized"));
                 }
                 let (handle, info) = start_injection(restore_token, self.output.clone()).await?;
@@ -125,13 +125,43 @@ impl Bridge {
                     .injection
                     .take()
                     .ok_or_else(|| anyhow!("input injection is not initialized"))?;
-                injection.stop().await?;
+                // A session the compositor already destroyed cannot be closed
+                // politely, and reporting that as an error would block the
+                // daemon's recovery path.
+                if injection.is_running() {
+                    injection.stop().await?;
+                }
                 Ok((json!({ "stopped": true }), false))
             }
             Command::Shutdown { .. } => {
                 self.stop_all().await?;
                 Ok((json!({ "shutdown": true }), true))
             }
+        }
+    }
+
+    /// Drop a handle whose portal session the compositor already destroyed.
+    ///
+    /// Returns true when the slot is free for a fresh session.
+    fn discard_dead_injection(&mut self) -> bool {
+        match &self.injection {
+            Some(injection) if injection.is_running() => false,
+            Some(_) => {
+                self.injection = None;
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn discard_dead_capture(&mut self) -> bool {
+        match &self.capture {
+            Some(capture) if capture.is_running() => false,
+            Some(_) => {
+                self.capture = None;
+                true
+            }
+            None => true,
         }
     }
 

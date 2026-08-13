@@ -3,14 +3,17 @@ import tempfile
 import threading
 import time
 import unittest
+from errno import ECONNREFUSED, ENETUNREACH
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from mwb_linux.config import Config
 from mwb_linux.config import HostTarget
 from mwb_linux.connection import (
+    NETWORK_DOWN_RETRY_SECONDS,
     AuthenticationError,
     ConnectionManager,
+    HandshakeTimeout,
     PeerConnection,
     PeerInfo,
     configure_tcp_liveness,
@@ -136,6 +139,166 @@ class ConnectionTests(unittest.TestCase):
             manager._run()
 
         resume.assert_called_once_with()
+
+    def test_signalled_resume_stops_the_polling_fallback_repeating_it(self):
+        """logind's resume signal arrives before the boottime poll notices."""
+
+        manager = ConnectionManager(Config(), lambda *_: None, lambda *_: None)
+        manager._suspend_offset = 0
+        manager._start_listener = Mock()
+        ticks = []
+
+        with patch("mwb_linux.connection._suspend_offset", return_value=9):
+            # The signal handler runs first, exactly as logind delivers it.
+            manager.resume_after_suspend()
+            self.assertEqual(manager._suspend_offset, 9)
+
+            def tick(_timeout):
+                ticks.append(1)
+                manager._stop.set()
+                return True
+
+            with (
+                patch.object(manager, "resume_after_suspend") as resume,
+                patch.object(manager._stop, "wait", side_effect=tick),
+            ):
+                manager._run()
+
+        self.assertEqual(len(ticks), 1)
+        resume.assert_not_called()
+
+    def test_pending_suspend_says_good_bye_over_the_live_socket(self):
+        statuses = []
+        manager = ConnectionManager(
+            Config(),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+        connection = Mock(trusted=True)
+        connection.info = PeerInfo(name="windows", machine_id=20)
+        manager._connections = [connection]
+
+        manager.prepare_for_suspend()
+
+        # notify=True sends BYE_BYE so Windows drops us at once instead of
+        # waiting out its own TCP timeout on a frozen peer.
+        connection.close.assert_called_once_with()
+        self.assertFalse(manager.connections)
+        self.assertEqual(
+            statuses[-1],
+            ("disconnected", "System is suspending; closed remote connections"),
+        )
+
+    def test_unreachable_link_retries_steadily_without_reporting_an_error(self):
+        statuses = []
+        manager = ConnectionManager(
+            Config(host="windows", secret="0123456789abcdef"),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+        target = manager.config.resolve_hosts()[0]
+
+        with patch(
+            "mwb_linux.connection.socket.create_connection",
+            side_effect=OSError(ENETUNREACH, "Network is unreachable"),
+        ):
+            manager._connect_target_worker(target)
+
+        self.assertIn("windows", manager._network_down)
+        self.assertEqual(
+            statuses[-1], ("connecting", "Waiting for the network to reach windows")
+        )
+        # The backoff stays untouched so the link coming back reconnects fast.
+        self.assertNotIn("windows", manager._retry_delay)
+        self.assertLessEqual(
+            manager._retry_after["windows"] - time.monotonic(), NETWORK_DOWN_RETRY_SECONDS
+        )
+
+    def test_a_refused_port_still_backs_off_exponentially(self):
+        statuses = []
+        manager = ConnectionManager(
+            Config(host="windows", secret="0123456789abcdef"),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+        target = manager.config.resolve_hosts()[0]
+
+        with patch(
+            "mwb_linux.connection.socket.create_connection",
+            side_effect=OSError(ECONNREFUSED, "Connection refused"),
+        ):
+            manager._connect_target_worker(target)
+            manager._connect_target_worker(target)
+
+        self.assertNotIn("windows", manager._network_down)
+        self.assertEqual(manager._retry_delay["windows"], 4.0)
+        self.assertEqual(statuses[-1][0], "error")
+
+    def test_a_slow_handshake_is_not_reported_as_a_wrong_security_key(self):
+        """A peer that is still waking must stay retryable, not blacklisted."""
+
+        statuses = []
+        manager = ConnectionManager(
+            Config(host="windows", secret="0123456789abcdef"),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+        target = manager.config.resolve_hosts()[0]
+
+        with (
+            patch("mwb_linux.connection.socket.create_connection", return_value=Mock()),
+            patch.object(
+                PeerConnection,
+                "authenticate",
+                side_effect=HandshakeTimeout("standalone-50k handshake did not complete"),
+            ),
+        ):
+            manager._connect_target_worker(target)
+
+        self.assertNotIn("windows", manager._authentication_failed)
+        self.assertNotEqual(statuses[-1][0], "invalid_key")
+        # A real key mismatch stops retrying; a timeout must keep going.
+        self.assertIn("windows", manager._retry_after)
+
+    def test_a_rejected_key_still_stops_retrying_every_profile(self):
+        statuses = []
+        manager = ConnectionManager(
+            Config(host="windows", secret="0123456789abcdef"),
+            lambda *_: None,
+            lambda state, message: statuses.append((state, message)),
+        )
+        target = manager.config.resolve_hosts()[0]
+
+        with (
+            patch("mwb_linux.connection.socket.create_connection", return_value=Mock()),
+            patch.object(
+                PeerConnection,
+                "authenticate",
+                side_effect=AuthenticationError("peer returned an invalid handshake proof"),
+            ),
+        ):
+            manager._connect_target_worker(target)
+
+        self.assertIn("windows", manager._authentication_failed)
+        self.assertEqual(statuses[-1][0], "invalid_key")
+
+    def test_handshake_timeout_is_distinct_from_a_proof_failure(self):
+        client, server = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(server.close)
+        connection = PeerConnection(
+            client,
+            Config(secret="0123456789abcdef"),
+            CryptoProfile.STANDALONE_50K,
+            lambda *_: None,
+            lambda *_: None,
+            outbound=True,
+        )
+
+        with self.assertRaises(HandshakeTimeout):
+            connection.authenticate(timeout=0.2)
+
+        self.assertNotIsInstance(HandshakeTimeout("slow"), AuthenticationError)
 
     def test_offline_host_does_not_block_other_target_attempts(self):
         manager = ConnectionManager(Config(), lambda *_: None, lambda *_: None)

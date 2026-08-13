@@ -672,3 +672,214 @@ class InputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LockScreenRecoveryTests(unittest.TestCase):
+    """GNOME destroys every injected input device while the screen is locked.
+
+    Recovery therefore has to rebuild only the dead half of the portal, and
+    only once the session is unlocked again. Restarting the whole bridge would
+    also discard the InputCapture session, which has no restore token on
+    portal version 1 and would force a fresh consent dialog every unlock.
+    """
+
+    def manager(self, bridge=None, messages=None):
+        return InputManager(
+            Config(edge_switching=True),
+            Mock(),
+            Mock(return_value=None),
+            (messages if messages is not None else []).append,
+            bridge=bridge or FakeBridge(),
+        )
+
+    def test_injection_loss_never_restarts_the_bridge(self):
+        bridge = FakeBridge()
+        manager = self.manager(bridge)
+        manager._desired = True
+        manager._started = True
+        manager._inject_ready = True
+        manager._capture_ready = True
+
+        with (
+            patch.object(manager, "_schedule_bridge_restart") as restart,
+            patch.object(manager, "_schedule_session_recovery") as recover,
+        ):
+            manager._bridge_event(
+                {"type": "event", "event": "inject_error", "error": "EIS disconnected: "}
+            )
+
+        # Killing the bridge is what produces the extra consent dialog.
+        restart.assert_not_called()
+        recover.assert_called_once_with()
+        self.assertFalse(manager._inject_ready)
+        self.assertTrue(manager.injection_paused)
+
+    def test_recovery_is_deferred_while_the_session_is_locked(self):
+        manager = self.manager()
+        manager._desired = True
+        manager._started = True
+
+        manager.session_lock_changed(True)
+        with patch.object(manager, "_recover_sessions") as recover:
+            manager._schedule_session_recovery()
+
+        recover.assert_not_called()
+        self.assertTrue(manager.session_locked)
+        self.assertTrue(manager.injection_paused)
+
+    def test_unlocking_rebuilds_only_the_dead_injection_session(self):
+        bridge = FakeBridge()
+        messages = []
+        manager = self.manager(bridge, messages)
+        manager._desired = True
+        manager._started = True
+        manager._inject_ready = False
+        manager._inject_started = True
+        # Capture survived, so it must not be touched or re-requested.
+        manager._capture_ready = True
+        manager.config.inject_restore_token = "token-123"
+
+        self.assertTrue(manager._recover_sessions())
+
+        commands = [name for name, _ in bridge.commands]
+        self.assertEqual(commands, ["inject_stop", "inject_init"])
+        self.assertNotIn("capture_init", commands)
+        init = dict(bridge.commands[1][1])
+        self.assertEqual(init["restore_token"], "token-123")
+        self.assertTrue(manager._inject_ready)
+        self.assertFalse(manager.injection_paused)
+
+    def test_a_dead_capture_session_is_rebuilt_alongside_injection(self):
+        bridge = FakeBridge()
+        manager = self.manager(bridge)
+        manager._desired = True
+        manager._started = True
+        manager._inject_ready = True
+        manager._capture_ready = False
+
+        self.assertTrue(manager._recover_sessions())
+
+        commands = [name for name, _ in bridge.commands]
+        self.assertEqual(commands, ["capture_init"])
+
+    def test_locking_releases_capture_so_no_key_stays_held(self):
+        manager = self.manager()
+        manager._desired = True
+        manager._started = True
+
+        with patch.object(manager, "release_local") as release:
+            manager.session_lock_changed(True)
+
+        release.assert_called_once_with()
+
+    def test_unlock_schedules_recovery(self):
+        manager = self.manager()
+        manager._desired = True
+        manager.session_locked = True
+
+        with patch.object(manager, "_schedule_session_recovery") as recover:
+            manager.session_lock_changed(False)
+
+        recover.assert_called_once_with()
+        self.assertFalse(manager.session_locked)
+
+    def test_bridge_death_still_restarts_the_whole_helper(self):
+        manager = self.manager()
+        manager._desired = True
+
+        with patch.object(manager, "_schedule_bridge_restart") as restart:
+            manager._bridge_event({"type": "event", "event": "bridge_stopped"})
+
+        restart.assert_called_once_with()
+
+    def test_paused_devices_report_the_lock_without_restarting_anything(self):
+        messages = []
+        manager = self.manager(messages=messages)
+
+        with patch.object(manager, "_schedule_bridge_restart") as restart:
+            manager._bridge_event(
+                {"type": "event", "event": "inject_devices_paused", "active": 0}
+            )
+
+        restart.assert_not_called()
+        self.assertTrue(manager.injection_paused)
+        self.assertIn("locked", messages[-1])
+
+    def test_commands_refused_by_a_locked_session_do_not_replace_the_status(self):
+        messages = []
+        manager = self.manager(messages=messages)
+        manager.session_locked = True
+        manager._inject_ready = False
+
+        manager._bridge_event(
+            {"type": "response", "ok": False, "error": "input injection task is not running"}
+        )
+
+        # The lock explanation must survive a burst of remote mouse packets.
+        self.assertEqual(messages, [])
+
+    def test_a_genuine_portal_error_is_still_reported(self):
+        messages = []
+        manager = self.manager(messages=messages)
+        manager.session_locked = False
+        manager._inject_ready = True
+
+        manager._bridge_event(
+            {"type": "response", "ok": False, "error": "portal is broken"}
+        )
+
+        self.assertIn("portal is broken", messages[-1])
+
+
+class CapturePersistenceTests(unittest.TestCase):
+    """InputCapture only gained restore tokens in interface version 2."""
+
+    def manager(self, messages=None):
+        return InputManager(
+            Config(edge_switching=True),
+            Mock(),
+            Mock(return_value=None),
+            (messages if messages is not None else []).append,
+            bridge=FakeBridge(),
+        )
+
+    def capture_response(self, manager, **result):
+        manager._bridge_event(
+            {"type": "response", "ok": True, "id": "capture", "result": result}
+        )
+
+    def test_version_one_reports_that_the_prompt_cannot_be_remembered(self):
+        manager = self.manager()
+
+        with self.assertLogs("mwb_linux.input", level="WARNING") as logs:
+            self.capture_response(manager, portal_version=1, zones=[])
+
+        self.assertFalse(manager.capture_persistable)
+        self.assertEqual(manager.capture_portal_version, 1)
+        self.assertIn("1.21.1", "\n".join(logs.output))
+
+    def test_the_unrememberable_prompt_is_explained_only_once(self):
+        manager = self.manager()
+
+        with self.assertLogs("mwb_linux.input", level="WARNING") as logs:
+            self.capture_response(manager, portal_version=1, zones=[])
+            self.capture_response(manager, portal_version=1, zones=[])
+
+        self.assertEqual(len(logs.output), 1)
+
+    def test_version_two_persists_the_token_without_warning(self):
+        manager = self.manager()
+
+        self.capture_response(
+            manager, portal_version=2, restore_token="tok-1", zones=[]
+        )
+
+        self.assertTrue(manager.capture_persistable)
+        self.assertEqual(manager.config.capture_restore_token, "tok-1")
+
+    def test_a_returned_token_counts_as_persistable_whatever_the_version(self):
+        manager = self.manager()
+
+        self.capture_response(manager, portal_version=0, restore_token="tok-2", zones=[])
+
+        self.assertTrue(manager.capture_persistable)

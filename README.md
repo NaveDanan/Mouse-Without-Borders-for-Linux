@@ -31,29 +31,29 @@ page. The release provides these files:
 
 | Distribution | x86-64 | ARM64 |
 | --- | --- | --- |
-| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.5_amd64.deb` | `powertoys-mouse-without-borders_0.5.5_arm64.deb` |
-| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.5-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.5-1.aarch64.rpm` |
-| Portable AppImage | `Mouse-Without-Borders-0.5.5-x86_64.AppImage` | `Mouse-Without-Borders-0.5.5-aarch64.AppImage` |
+| Debian/Ubuntu | `powertoys-mouse-without-borders_0.6.0_amd64.deb` | `powertoys-mouse-without-borders_0.6.0_arm64.deb` |
+| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.6.0-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.6.0-1.aarch64.rpm` |
+| Portable AppImage | `Mouse-Without-Borders-0.6.0-x86_64.AppImage` | `Mouse-Without-Borders-0.6.0-aarch64.AppImage` |
 
 Debian or Ubuntu:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.5.5_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.6.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
 Fedora or another RPM-based distribution:
 
 ```sh
-sudo dnf install ./powertoys-mouse-without-borders-0.5.5-1.x86_64.rpm
+sudo dnf install ./powertoys-mouse-without-borders-0.6.0-1.x86_64.rpm
 powertoys-mouse-without-borders
 ```
 
 Portable AppImage:
 
 ```sh
-chmod +x Mouse-Without-Borders-0.5.5-x86_64.AppImage
-./Mouse-Without-Borders-0.5.5-x86_64.AppImage
+chmod +x Mouse-Without-Borders-0.6.0-x86_64.AppImage
+./Mouse-Without-Borders-0.6.0-x86_64.AppImage
 ```
 
 Replace `amd64`/`x86_64` with `arm64`/`aarch64` on an ARM64 computer. The
@@ -96,7 +96,7 @@ APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
 Packages are written to `dist/`. Install a local DEB build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.5.5_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.6.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -189,12 +189,35 @@ signal desktop user activity to wake the display, but the daemon and its TCP/EIS
 sessions remain available. This is necessary because a fully suspended
 userspace process cannot receive the mouse packet intended to wake it and stock
 Windows Mouse Without Borders does not send a Linux Wake-on-LAN packet. If the
-system is forcibly suspended anyway, stale sockets are discarded and
-connections retry immediately on resume. Live portal sessions are preserved;
-only a session the compositor actually dropped is rebuilt with its saved token.
-InputCapture v1 has no restore tokens, so a real compositor/session loss on
-those desktops still requires approval. Uncheck the option when normal
-automatic system suspend is preferred.
+system is suspended anyway, the service reacts to logind's `PrepareForSleep`
+fence: it releases the compositor grab and closes the control channels while the
+network is still up, so the Windows peer sees a clean disconnect rather than a
+half-open socket, and it rebuilds both channels the moment the system resumes.
+Uncheck the option when normal automatic system suspend is preferred.
+
+Two Linux-only switches sit under **Other Options -> Linux Power**, both off by
+default:
+
+**Stay connected when the laptop lid closes.** `logind.conf` documents that
+`LidSwitchIgnoreInhibited=` defaults to `yes`, so a plain `sleep` inhibitor is
+silently ignored on a lid event and the machine suspends regardless. Enabling
+this additionally takes the low-level `handle-lid-switch` lock and locks the
+session in software instead, keeping the desktop secured while the peer stays
+connected. Leave it off if the machine may be carried in a bag while connected.
+
+**Never lock this screen while a remote PC is connected.** A locked session
+cannot accept remote input at all: the compositor destroys every injected input
+device when the screen locks, through the portal and through mutter's own API
+alike. This holds a GNOME idle inhibitor so the screen never auto-locks while a
+peer is sharing the desktop. A manual lock still locks.
+
+When the screen does lock, remote input is reported as unavailable rather than
+silently dropped, and only the sessions the compositor actually destroyed are
+rebuilt once the session is unlocked again. Remote input injection restores
+itself from its saved RemoteDesktop token without a prompt. Screen-edge capture
+cannot do the same yet: InputCapture session persistence needs version 2 of
+that interface, and while xdg-desktop-portal has supported it since 1.21.1, no
+released desktop backend implements it, so that grant must be approved again.
 
 Base TCP port and encryption compatibility live at the bottom of the IP
 Mappings tab; the mapping table itself resolves a machine name to an address

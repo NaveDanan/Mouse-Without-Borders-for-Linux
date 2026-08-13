@@ -19,6 +19,10 @@ from .protocol import ID_ALL, ID_NONE, Packet, PackageType
 from .topology import direction_to, neighbour
 
 LOGGER = logging.getLogger(__name__)
+#: InputCapture gained CreateSession2/Start with restore tokens in interface
+#: version 2, shipped by xdg-desktop-portal 1.21.1.
+CAPTURE_PERSIST_VERSION = 2
+CAPTURE_PERSIST_RELEASE = "1.21.1"
 WINDOWS_EPOCH_TICKS = 621_355_968_000_000_000
 
 WM_MOUSEMOVE = 0x200
@@ -324,6 +328,17 @@ class InputManager:
         self.inject_width = float(self.width)
         self.inject_height = float(self.height)
         self.inject_regions: list[tuple[int, int, int, int]] = []
+        # The compositor pauses every injection device while this PC is
+        # locked. Tracking it keeps a dead lock screen from looking like a
+        # working session that silently swallows every packet.
+        self.injection_paused = False
+        self.session_locked = False
+        self._inject_ready = False
+        self._inject_started = False
+        self._recovery_scheduled = False
+        self.capture_portal_version = 0
+        self.capture_persistable = False
+        self._capture_persistence_reported = False
         self._keys_down: set[int] = set()
         self._started = False
         self._desired = False
@@ -380,6 +395,8 @@ class InputManager:
                 targets=capture_targets(self.config),
             )
             self._started = True
+            self._inject_ready = False
+            self._inject_started = True
             # InputCapture initialization is asynchronous and may still be
             # displaying the first-run consent dialog.
             self._capture_enabled = False
@@ -430,6 +447,9 @@ class InputManager:
         self._started = False
         self._capture_ready = False
         self._capture_enabled = False
+        self._inject_ready = False
+        self._inject_started = False
+        self.injection_paused = False
 
     def switch_remote(self, machine_name: str | None = None) -> None:
         if machine_name:
@@ -645,7 +665,15 @@ class InputManager:
     def _bridge_event(self, event: dict) -> None:
         if event.get("type") == "response":
             if not event.get("ok"):
-                self.status_callback(f"Input portal error: {event.get('error', 'unknown')}")
+                error = str(event.get("error", "unknown"))
+                if self.session_locked or not self._inject_ready:
+                    # Every injection is refused while the compositor holds no
+                    # input devices. That is expected, and the lock status
+                    # already explains it, so do not bury it under one error
+                    # per remote mouse packet.
+                    LOGGER.debug("portal command rejected while unavailable: %s", error)
+                    return
+                self.status_callback(f"Input portal error: {error}")
                 return
             if event.get("id") == "capture":
                 result = event.get("result", {})
@@ -653,6 +681,7 @@ class InputManager:
                 if token:
                     self.config.capture_restore_token = token
                     self.persist_config()
+                self._note_capture_persistence(result, bool(token))
                 zones = result.get("zones", [])
                 if zones:
                     left = min(int(zone.get("x", 0)) for zone in zones)
@@ -670,6 +699,9 @@ class InputManager:
                 if token:
                     self.config.inject_restore_token = token
                     self.persist_config()
+                self._inject_ready = True
+                self._inject_started = True
+                self.injection_paused = False
                 self.status_callback("Remote input permission ready")
             return
         event_type = event.get("event")
@@ -721,11 +753,176 @@ class InputManager:
                 self.inject_y = float(top)
                 self.inject_width = float(right - left)
                 self.inject_height = float(bottom - top)
-        elif event_type and (
-            event_type.endswith("_error") or event_type == "bridge_stopped"
-        ):
+        elif event_type in ("inject_devices_paused", "inject_devices_resumed"):
+            self._update_injection_availability(int(event.get("active", 0)))
+        elif event_type == "inject_error":
+            # The compositor tears the RemoteDesktop session down every time
+            # the screen locks. Injection owns a restore token, so it can be
+            # rebuilt silently; destroying the whole bridge would also throw
+            # away the capture session and force a fresh consent dialog.
+            self.injection_paused = True
+            self._inject_ready = False
+            self.status_callback(
+                "This PC is locked; remote input resumes when you unlock it"
+                if self.session_locked
+                else f"Remote input interrupted: {event.get('error', 'unknown')}"
+            )
+            self._schedule_session_recovery()
+        elif event_type == "capture_error":
+            self._capture_ready = False
+            self._capture_enabled = False
+            self.status_callback(
+                f"Screen-edge capture interrupted: {event.get('error', 'unknown')}"
+            )
+            self._schedule_session_recovery()
+        elif event_type == "bridge_stopped":
+            self.status_callback("Input portal helper stopped; restarting")
+            self._schedule_bridge_restart()
+        elif event_type and event_type.endswith("_error"):
             self.status_callback(f"Input portal error: {event.get('error', 'unknown')}")
             self._schedule_bridge_restart()
+
+    def session_lock_changed(self, locked: bool) -> None:
+        """Track the lock screen, which decides whether portal input can exist."""
+
+        self.session_locked = locked
+        if locked:
+            # Nothing can be rebuilt now: the compositor refuses to hand a
+            # locked session any input device. Stop trying and say why.
+            self.release_local()
+            self.injection_paused = True
+            self.status_callback(
+                "This PC is locked; remote input resumes when you unlock it"
+            )
+            return
+        self._schedule_session_recovery()
+
+    def _schedule_session_recovery(self) -> None:
+        """Rebuild only the portal sessions the compositor actually destroyed."""
+
+        if not self._desired or self.session_locked:
+            return
+        with self._restart_lock:
+            if self._recovery_scheduled:
+                return
+            self._recovery_scheduled = True
+
+        def recover() -> None:
+            try:
+                for attempt in range(6):
+                    time.sleep(min(1 + attempt, 4))
+                    if not self._desired or self.session_locked:
+                        return
+                    if self._recover_sessions():
+                        return
+                self.status_callback(
+                    "Remote input could not be restored; reconnect to retry"
+                )
+            finally:
+                with self._restart_lock:
+                    self._recovery_scheduled = False
+        self.capture_portal_version = 0
+        self.capture_persistable = False
+        self._capture_persistence_reported = False
+
+        threading.Thread(
+            target=recover, name="mwb-portal-recovery", daemon=True
+        ).start()
+
+    def _recover_sessions(self) -> bool:
+        """Re-arm the dead half of the portal without disturbing the live half."""
+
+        if not self._started:
+            self.start()
+            return self._started
+        recovered = True
+        if not self._inject_ready:
+            if self._inject_started:
+                try:
+                    # Frees the bridge's slot. The compositor already destroyed
+                    # the session, so a failure here is expected and harmless.
+                    self.bridge.request("inject_stop", timeout=3.0)
+                except (ConnectionError, TimeoutError):
+                    LOGGER.debug("dead injection session could not be closed politely")
+                self._inject_started = False
+            try:
+                response = self.bridge.request(
+                    "inject_init",
+                    timeout=15.0,
+                    restore_token=self.config.inject_restore_token or None,
+                )
+            except (ConnectionError, TimeoutError) as exc:
+                LOGGER.info("remote input session not restorable yet: %s", exc)
+                recovered = False
+            else:
+                token = response.get("result", {}).get("restore_token")
+                if token:
+                    self.config.inject_restore_token = token
+                    self.persist_config()
+                self._inject_ready = True
+                self._inject_started = True
+                self.injection_paused = False
+                self.status_callback("Remote input permission ready")
+        if self.config.edge_switching and not self._capture_ready:
+            try:
+                self.bridge.request(
+                    "capture_init",
+                    timeout=60.0,
+                    edge=self.config.host_position,
+                    restore_token=self.config.capture_restore_token or None,
+                    zone=list(self.config.host_zone) if self.config.host_zone else None,
+                    targets=capture_targets(self.config) or None,
+                )
+            except (ConnectionError, TimeoutError) as exc:
+                LOGGER.info("screen-edge capture not restorable yet: %s", exc)
+                recovered = False
+        return recovered
+
+    def _note_capture_persistence(self, result: dict, stored_token: bool) -> None:
+        """Explain a permission prompt that the portal is unable to remember.
+
+        Session persistence for InputCapture arrived in interface version 2
+        (xdg-desktop-portal 1.21.1). On version 1 there is no restore token at
+        all, so every rebuilt capture session must ask the user again. Saying
+        so once beats leaving the repeated dialog unexplained.
+        """
+
+        try:
+            version = int(result.get("portal_version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        self.capture_portal_version = version
+        self.capture_persistable = bool(stored_token) or version >= CAPTURE_PERSIST_VERSION
+        if self.capture_persistable or self._capture_persistence_reported:
+            return
+        self._capture_persistence_reported = True
+        LOGGER.warning(
+            "InputCapture portal version %d cannot remember this permission; "
+            "xdg-desktop-portal %s or newer is required to stop the prompt "
+            "returning after every lock or restart",
+            version,
+            CAPTURE_PERSIST_RELEASE,
+        )
+
+    def _update_injection_availability(self, active_devices: int) -> None:
+        """Report the compositor suspending injection, usually a lock screen.
+
+        A paused device is not an error and must not restart the bridge: the
+        portal session is still valid and the compositor resumes it by itself
+        once the session is unlocked.
+        """
+
+        paused = active_devices <= 0
+        if paused == self.injection_paused:
+            return
+        self.injection_paused = paused
+        if paused:
+            self.status_callback(
+                "This PC is locked; unlock it to let the remote keyboard and "
+                "mouse control it again"
+            )
+        else:
+            self.status_callback("Remote input session resumed")
 
     def _schedule_bridge_restart(self) -> None:
         """Recreate portal sessions if the compositor drops them after resume."""

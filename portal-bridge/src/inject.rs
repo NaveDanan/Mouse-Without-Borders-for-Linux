@@ -46,6 +46,15 @@ pub struct InjectionHandle {
 }
 
 impl InjectionHandle {
+    /// Report whether the portal session behind this handle is still alive.
+    ///
+    /// The compositor destroys the RemoteDesktop session when the screen
+    /// locks, which ends the task while the handle is still held. Recovering
+    /// means replacing the dead handle, not refusing a second initialization.
+    pub fn is_running(&self) -> bool {
+        !self.join.is_finished()
+    }
+
     pub async fn inject(&self, action: InjectAction) -> Result<()> {
         let (reply, response) = oneshot::channel();
         self.control
@@ -299,6 +308,13 @@ async fn process_device_event(
             {
                 device.resumed = true;
             }
+            output
+                .send(event(
+                    "inject_devices_resumed",
+                    json!({ "active": active_device_count(devices) }),
+                ))
+                .await
+                .map_err(|_| anyhow!("stdout writer stopped"))?;
         }
         EiEvent::DevicePaused(event_value) => {
             if let Some(device) = devices
@@ -307,6 +323,16 @@ async fn process_device_event(
             {
                 device.resumed = false;
             }
+            // The compositor pauses every injection device while the session
+            // is locked. Reporting it turns silent dead input into a status
+            // the user can act on.
+            output
+                .send(event(
+                    "inject_devices_paused",
+                    json!({ "active": active_device_count(devices) }),
+                ))
+                .await
+                .map_err(|_| anyhow!("stdout writer stopped"))?;
         }
         EiEvent::DeviceRemoved(event_value) => {
             devices.retain(|device| device.device != event_value.device);
@@ -460,6 +486,10 @@ async fn close_injection(
     connection.flush()?;
     session.close().await?;
     Ok(())
+}
+
+fn active_device_count(devices: &[InjectionDevice]) -> usize {
+    devices.iter().filter(|device| device.resumed).count()
 }
 
 fn capability_summary(devices: &[InjectionDevice]) -> Value {

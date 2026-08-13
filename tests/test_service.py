@@ -160,7 +160,7 @@ class ServiceTests(unittest.TestCase):
 
             service._sync_sleep_inhibitor()
             service.power.set_connected.assert_called_once_with(
-                True, block_sleep=True
+                True, block_sleep=True, block_lid=False, block_lock=False
             )
 
             service.power.reset_mock()
@@ -170,8 +170,72 @@ class ServiceTests(unittest.TestCase):
             service._connection_requested = False
             service._sync_sleep_inhibitor()
             service.power.set_connected.assert_called_once_with(
-                False, block_sleep=True
+                False, block_sleep=True, block_lid=False, block_lock=False
             )
+
+    def test_lid_policy_is_forwarded_from_the_settings_form(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                auto_connect=False,
+                other_options={"stay_awake_on_lid_close": True},
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.power = Mock()
+            service._connection_requested = True
+
+            service._sync_sleep_inhibitor()
+
+            service.power.set_connected.assert_called_once_with(
+                True, block_sleep=True, block_lid=True, block_lock=False
+            )
+
+    def test_pending_suspend_releases_capture_then_closes_channels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            order = []
+            service.input = Mock()
+            service.input.release_local.side_effect = lambda: order.append("release")
+            service.connection = Mock()
+            service.connection.prepare_for_suspend.side_effect = lambda: order.append(
+                "close"
+            )
+
+            service._prepare_for_sleep(True)
+
+            # Key-up events must still reach Windows over the live socket.
+            self.assertEqual(order, ["release", "close"])
+            service.connection.resume_after_suspend.assert_not_called()
+
+    def test_resume_signal_rebuilds_connections_without_waiting_for_polling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.connection = Mock()
+
+            service._prepare_for_sleep(False)
+
+            service.connection.resume_after_suspend.assert_called_once_with()
+            service.connection.prepare_for_suspend.assert_not_called()
+
+    def test_repeated_status_updates_are_logged_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+
+            with patch("mwb_linux.service.LOGGER") as logger:
+                service._set_status("connecting", "Waiting for the network to reach pc")
+                service._set_status("connecting", "Waiting for the network to reach pc")
+                service._set_status("connected", "Connected to pc")
+
+            self.assertEqual(logger.info.call_count, 2)
+            self.assertEqual(service._status["state"], "connected")
 
     def test_drag_control_packets_are_forwarded_to_file_transfer(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -511,3 +575,39 @@ class ServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionLockForwardingTests(unittest.TestCase):
+    def test_lock_state_reaches_the_portal_input_manager(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(auto_connect=False).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock()
+
+            service._session_locked(True)
+            service._session_locked(False)
+
+            self.assertEqual(
+                [call.args[0] for call in service.input.session_lock_changed.call_args_list],
+                [True, False],
+            )
+
+    def test_never_lock_option_is_forwarded_to_the_power_manager(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                auto_connect=False,
+                other_options={"never_lock_while_connected": True},
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.power = Mock()
+            service._connection_requested = True
+
+            service._sync_sleep_inhibitor()
+
+            service.power.set_connected.assert_called_once_with(
+                True, block_sleep=True, block_lid=False, block_lock=True
+            )

@@ -28,6 +28,18 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.6.0" date="2026-08-13">
+      <description>
+        <p>
+          Stay connected across suspend, resume and the lock screen. The lid
+          switch no longer bypasses the sleep inhibitor, suspend now closes the
+          control channels cleanly and rebuilds them the moment the system
+          wakes, and a slow handshake is no longer mistaken for a wrong
+          security key. Remote input recovers on its own after the screen is
+          unlocked instead of discarding the whole portal helper.
+        </p>
+      </description>
+    </release>
     <release version="0.5.5" date="2026-08-13">
       <description>
         <p>

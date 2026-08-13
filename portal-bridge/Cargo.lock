@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "mwb-portal-bridge"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ashpd",

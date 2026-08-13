@@ -84,6 +84,9 @@ install -m 0644 THIRD-PARTY-NOTICES.md \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg
 
 %changelog
+* Thu Aug 13 2026 Nave Danan <nave0712@gmail.com> - 0.6.0-1
+- Keep the connection alive across lid close, suspend, resume and lock screen.
+
 * Thu Aug 13 2026 Nave Danan <nave0712@gmail.com> - 0.5.5-1
 - Fix lock-screen wake, reconnect inhibition, and portal grant continuity.
 

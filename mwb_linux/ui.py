@@ -125,6 +125,20 @@ RIGHT_OPTIONS = (
 #: Options stored directly on Config rather than in Config.other_options.
 DEDICATED_OPTIONS = {"share_clipboard", "share_images"}
 
+#: Linux-only power behaviour, shown apart from the Windows parity columns.
+LINUX_OPTIONS = (
+    (
+        "stay_awake_on_lid_close",
+        "Stay connected when the laptop lid closes (locks the session instead "
+        "of suspending)",
+    ),
+    (
+        "never_lock_while_connected",
+        "Never lock this screen while a remote PC is connected (a locked "
+        "session cannot accept remote input)",
+    ),
+)
+
 SWITCH_MODES = (("fkeys", "F1, F2, F3, F4"), ("numbers", "1, 2, 3, 4"), ("disabled", "Disable"))
 
 LEFT_HOTKEYS = (
@@ -680,6 +694,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 column.append(button)
             columns.append(column)
         page.append(columns)
+
+        power = Fieldset("Linux Power")
+        for key, caption in LINUX_OPTIONS:
+            button = check_button(caption)
+            self.option_buttons[key] = button
+            power.append(button)
+        page.append(power)
 
         updates = horizontal(8)
         updates.set_margin_bottom(8)

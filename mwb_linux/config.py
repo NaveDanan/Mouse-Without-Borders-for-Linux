@@ -42,6 +42,15 @@ OTHER_OPTION_DEFAULTS: dict[str, bool] = {
     "block_mouse_at_corners": False,
     "use_key_mappings": False,
     "show_status_messages": False,
+    # Linux-only, opt-in. logind ignores the "sleep" block inhibitor when the
+    # lid closes, so staying reachable needs the low-level lid lock plus a
+    # software session lock in its place. Off by default because it also stops
+    # a closed laptop from sleeping in a bag.
+    "stay_awake_on_lid_close": False,
+    # Linux-only, opt-in. A locked GNOME session has no remote input at all
+    # because the compositor destroys every injected device, so the only way
+    # to stay controllable is to never reach the lock screen.
+    "never_lock_while_connected": False,
 }
 
 #: Single-letter accelerators shown on the Other Options tab. ``Disable``

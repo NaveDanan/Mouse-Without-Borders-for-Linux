@@ -148,7 +148,7 @@ class MouseWithoutBordersService:
                 self._resume_after_suspend,
             )
         if self.power is None:
-            self.power = PowerManager()
+            self.power = PowerManager(self._prepare_for_sleep, self._session_locked)
         if self.clipboard is None and self.config.share_clipboard:
             self.clipboard = ClipboardManager(
                 self._broadcast, share_images=self.config.share_images
@@ -228,6 +228,12 @@ class MouseWithoutBordersService:
             self._connection_requested and configured,
             block_sleep=bool(
                 self.config.other_options.get("block_screen_saver", True)
+            ),
+            block_lid=bool(
+                self.config.other_options.get("stay_awake_on_lid_close", False)
+            ),
+            block_lock=bool(
+                self.config.other_options.get("never_lock_while_connected", False)
             ),
         )
 
@@ -347,19 +353,53 @@ class MouseWithoutBordersService:
 
     def _input_status(self, message: str) -> None:
         with self._status_lock:
+            repeated = self._status["input"] == message
             self._status["input"] = message
             self._status["updated"] = time.time()
+        if not repeated:
+            # Portal and compositor transitions are the hardest part of this
+            # app to diagnose after the fact; keep them in the log.
+            LOGGER.info("input=%s", message)
 
     def _resume_after_suspend(self) -> None:
         if self.input:
             self.input.resume_after_suspend()
 
+    def _prepare_for_sleep(self, about_to_sleep: bool) -> None:
+        """React to logind's suspend fence instead of guessing after the fact."""
+
+        if about_to_sleep:
+            # Release the compositor grab first so no key stays logically held
+            # on the Windows peer, then close the channels while the network
+            # interface is still up.
+            if self.input:
+                self.input.release_local()
+            if self.connection:
+                self.connection.prepare_for_suspend()
+            return
+        if self.connection:
+            self.connection.resume_after_suspend()
+
+    def _session_locked(self, locked: bool) -> None:
+        """Forward lock screen transitions to the portal input session.
+
+        The compositor destroys every remote input device while this PC is
+        locked, so recovery has to wait for the unlock rather than fight it.
+        """
+
+        if self.input:
+            self.input.session_lock_changed(locked)
+
     def _set_status(self, state: str, message: str) -> None:
         with self._status_lock:
+            repeated = self._status["state"] == state and self._status["message"] == message
             self._status["state"] = state
             self._status["message"] = message
             self._status["updated"] = time.time()
-        LOGGER.info("state=%s: %s", state, message)
+        if not repeated:
+            # A link that is down retries every second; logging each identical
+            # attempt buries the transitions that actually matter.
+            LOGGER.info("state=%s: %s", state, message)
 
     def _persist_config(self) -> None:
         """Serialize portal tokens and learned network metadata without races."""

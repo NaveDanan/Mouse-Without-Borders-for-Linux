@@ -9,6 +9,7 @@ import secrets
 import socket
 import threading
 import time
+from errno import EHOSTUNREACH, ENETDOWN, ENETUNREACH, ENONET
 from ipaddress import ip_address
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +37,11 @@ TCP_KEEPINTVL_SECONDS = 5
 TCP_KEEPCNT = 3
 TCP_USER_TIMEOUT_MS = 20_000
 MAC_ADDRESS_PATTERN = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+#: A resumed laptop reaches the connect loop long before NetworkManager has
+#: reassociated. Those failures are expected, so they retry at a steady pace
+#: instead of burning the exponential backoff and reporting an error.
+NETWORK_DOWN_ERRNOS = frozenset({ENETUNREACH, ENETDOWN, EHOSTUNREACH, ENONET})
+NETWORK_DOWN_RETRY_SECONDS = 1.0
 
 
 def _suspend_offset() -> float:
@@ -109,6 +115,15 @@ def wake_on_lan(mac: str, addresses: tuple[str, ...] = ()) -> bool:
 
 class AuthenticationError(ConnectionError):
     """The peer did not prove knowledge of the shared key."""
+
+
+class HandshakeTimeout(ConnectionError):
+    """The handshake never completed, without disproving the shared key.
+
+    A peer that is still booting, still reassociating its Wi-Fi, or simply
+    slow must stay retryable. Treating this as an authentication failure would
+    blacklist a perfectly good machine until the user intervened.
+    """
 
 
 @dataclass(slots=True)
@@ -201,9 +216,14 @@ class PeerConnection:
             attempts += 1
             try:
                 packet = self.receive_packet()
-            except (ProtocolError, TimeoutError, socket.timeout, EOFError) as exc:
+            except ProtocolError as exc:
+                # Undecodable bytes mean the peer encrypted with another key.
                 raise AuthenticationError(
                     f"{self.profile.value} handshake failed: {exc}"
+                ) from exc
+            except (TimeoutError, socket.timeout, EOFError) as exc:
+                raise HandshakeTimeout(
+                    f"{self.profile.value} handshake did not complete: {exc}"
                 ) from exc
             if packet.type == PackageType.HANDSHAKE:
                 packet.type = PackageType.HANDSHAKE_ACK
@@ -356,6 +376,7 @@ class ConnectionManager:
         self._retry_after: dict[str, float] = {}
         self._retry_delay: dict[str, float] = {}
         self._connecting_targets: set[str] = set()
+        self._network_down: set[str] = set()
         self._target_threads: set[threading.Thread] = set()
         self._authentication_threads: set[threading.Thread] = set()
         self._suspend_offset = _suspend_offset()
@@ -553,6 +574,10 @@ class ConnectionManager:
             if self._connect_outbound(target):
                 self._retry_delay[key] = 1.0
                 self._retry_after.pop(key, None)
+            elif key in self._network_down:
+                # Keep the backoff untouched so the first attempt after the
+                # link returns is immediate rather than half a minute later.
+                self._retry_after[key] = time.monotonic() + NETWORK_DOWN_RETRY_SECONDS
             else:
                 delay = self._retry_delay.get(key, 1.0)
                 self._retry_after[key] = time.monotonic() + delay
@@ -579,6 +604,7 @@ class ConnectionManager:
         target_key = target.name.casefold()
         last_error = "connection failed"
         authentication_errors = 0
+        network_down = False
         profiles = self._profiles(target.name)
         for profile in profiles:
             if self._stop.is_set():
@@ -633,13 +659,21 @@ class ConnectionManager:
                     return False
                 # Let Windows learn the machine before committing the layout.
                 threading.Timer(1.0, self._safe_send_matrix, args=(connection,)).start()
+                self._network_down.discard(target_key)
                 self._report_connected(connection)
                 return True
             except (OSError, AuthenticationError, ProtocolError) as exc:
                 last_error = str(exc)
                 if isinstance(exc, (AuthenticationError, ProtocolError)):
                     authentication_errors += 1
-                LOGGER.warning("%s profile rejected: %s", profile.value, exc)
+                if isinstance(exc, OSError) and exc.errno in NETWORK_DOWN_ERRNOS:
+                    network_down = True
+                    LOGGER.debug("%s is unreachable while the link is down: %s", target.name, exc)
+                elif isinstance(exc, HandshakeTimeout):
+                    # Say "slow", not "rejected": the key was never disproved.
+                    LOGGER.info("%s did not answer in time: %s", target.name, exc)
+                else:
+                    LOGGER.warning("%s profile rejected: %s", profile.value, exc)
                 if registered and connection is not None:
                     self._discard_connection(connection)
                 elif connection is not None:
@@ -655,6 +689,13 @@ class ConnectionManager:
                         self._connecting_sockets.discard(raw_socket)
         if self._stop.is_set():
             return False
+        if network_down and not authentication_errors:
+            self._network_down.add(target_key)
+            self.status_callback(
+                "connecting", f"Waiting for the network to reach {target.name}"
+            )
+            return False
+        self._network_down.discard(target_key)
         if authentication_errors == len(profiles):
             self._authentication_failed.add(target_key)
             self.status_callback(
@@ -922,11 +963,34 @@ class ConnectionManager:
             self._reconnect.set()
         return sent or awake_sent
 
+    def prepare_for_suspend(self) -> None:
+        """Say good-bye before the kernel freezes this machine's network.
+
+        Without this the Windows peer keeps a half-open socket until its own
+        TCP timeout expires, which looks like a hang rather than a disconnect
+        and delays the reconnect once the Linux PC returns.
+        """
+
+        if self._stop.is_set():
+            return
+        with self._lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for connection in connections:
+            connection.close()
+        self._network_down.clear()
+        self.status_callback(
+            "disconnected", "System is suspending; closed remote connections"
+        )
+
     def resume_after_suspend(self) -> None:
         """Invalidate inherited sockets and immediately rebuild both channels."""
 
         if self._stop.is_set():
             return
+        # Claim the boottime jump so the polling fallback in _run() does not
+        # tear the freshly rebuilt channels down a second time.
+        self._suspend_offset = _suspend_offset()
         with self._lock:
             connections = list(self._connections)
             self._connections.clear()
@@ -935,6 +999,7 @@ class ConnectionManager:
         self._authentication_failed.clear()
         self._retry_after.clear()
         self._retry_delay.clear()
+        self._network_down.clear()
         self._reconnect.set()
         try:
             self.resume_callback()

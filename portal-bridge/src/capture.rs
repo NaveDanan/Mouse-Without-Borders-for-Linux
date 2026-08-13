@@ -75,6 +75,11 @@ pub struct CaptureHandle {
 }
 
 impl CaptureHandle {
+    /// Report whether the portal session behind this handle is still alive.
+    pub fn is_running(&self) -> bool {
+        !self.join.is_finished()
+    }
+
     pub async fn release(&self, cursor_position: Option<[f64; 2]>) -> Result<()> {
         let (reply, response) = oneshot::channel();
         self.control
