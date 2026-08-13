@@ -969,3 +969,91 @@ class KernelInputBackendTests(unittest.TestCase):
         })
 
         self.assertIn("/dev/uinput", messages[-1])
+
+    def test_expected_capture_loss_does_not_bury_the_lock_screen_report(self):
+        messages = []
+        manager = self.manager(messages, use_kernel_input=True)
+        manager._desired = True
+        manager._started = True
+
+        manager.session_lock_changed(True)
+        manager._bridge_event(
+            {"type": "event", "event": "capture_error", "error": "EIS disconnected: "}
+        )
+
+        # The user needs to know input still works, not that a portal session
+        # the lock screen always destroys has been destroyed.
+        self.assertIn("still work", messages[-1])
+
+    def test_capture_loss_while_unlocked_is_still_reported(self):
+        messages = []
+        manager = self.manager(messages)
+        manager._desired = True
+        manager._started = True
+
+        with patch.object(manager, "_schedule_session_recovery"):
+            manager._bridge_event(
+                {"type": "event", "event": "capture_error", "error": "boom"}
+            )
+
+        self.assertIn("boom", messages[-1])
+
+    def test_kernel_input_selects_the_evdev_capture_backend(self):
+        manager = self.manager(use_kernel_input=True)
+        self.assertEqual(manager.capture_backend, "evdev")
+
+    def test_the_portal_capture_backend_remains_the_default(self):
+        self.assertEqual(self.manager().capture_backend, "portal")
+
+    def test_the_capture_backend_and_desktop_reach_the_bridge(self):
+        bridge = FakeBridge()
+        manager = InputManager(
+            Config(edge_switching=True, other_options={"use_kernel_input": True}),
+            Mock(),
+            Mock(return_value=None),
+            [].append,
+            bridge=bridge,
+        )
+        manager._desired = True
+
+        manager.start()
+
+        start = next(c for c in bridge.commands if c[0] == "start")
+        self.assertEqual(start[2]["capture_backend"], "evdev")
+
+    def test_a_persistent_capture_session_raises_no_version_warning(self):
+        messages = []
+        manager = self.manager(messages, use_kernel_input=True)
+
+        # evdev capture is not a portal session, so it is never revoked and
+        # must not be reported as unable to remember its permission.
+        manager._bridge_event({
+            "type": "response", "ok": True, "id": "capture",
+            "result": {"backend": "evdev", "persistent": True, "zones": []},
+        })
+
+        self.assertTrue(manager.capture_persistable)
+
+    def test_a_capture_fallback_is_explained_rather_than_silent(self):
+        messages = []
+        manager = self.manager(messages, use_kernel_input=True)
+
+        manager._bridge_event({
+            "type": "event",
+            "event": "capture_backend_fallback",
+            "reason": "no readable keyboard or pointer devices were found",
+        })
+
+        self.assertIn("no readable keyboard", messages[-1])
+
+    def test_a_device_change_is_logged_rather_than_silent(self):
+        manager = self.manager(use_kernel_input=True)
+
+        with self.assertLogs("mwb_linux.input", level="INFO") as logs:
+            manager._bridge_event({
+                "type": "event",
+                "event": "capture_devices_changed",
+                "devices": ["A keyboard", "A mouse"],
+            })
+
+        self.assertIn("A mouse", "\n".join(logs.output))

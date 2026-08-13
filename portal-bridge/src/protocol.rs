@@ -20,6 +20,21 @@ pub enum KeyState {
     Released,
 }
 
+/// Which mechanism detects a screen-edge crossing.
+///
+/// The portal is exact but its session dies with the lock screen and, on
+/// interface version 1, cannot be restored without asking the user again.
+/// `Evdev` reads the devices directly, so it never prompts.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureBackend {
+    #[default]
+    Portal,
+    Evdev,
+    /// Prefer evdev when the devices are readable, else fall back.
+    Auto,
+}
+
 /// Which mechanism delivers injected input to the desktop.
 ///
 /// The portal is the sandbox-friendly default. `Uinput` creates kernel input
@@ -61,6 +76,12 @@ pub enum Command {
         id: Option<Value>,
     },
     CaptureInit {
+        /// Which capture path to use: "portal", "evdev" or "auto".
+        #[serde(default)]
+        backend: Option<CaptureBackend>,
+        /// Desktop geometry the evdev edge tracker is confined to.
+        #[serde(default)]
+        screen: Option<[i32; 4]>,
         #[serde(default)]
         id: Option<Value>,
         /// Legacy single-target edge. It remains accepted when `targets` is
@@ -215,6 +236,8 @@ mod tests {
         assert_eq!(
             command,
             Command::CaptureInit {
+                backend: None,
+                screen: None,
                 id: Some(json!(7)),
                 edge: Some(Edge::Right),
                 restore_token: Some("token".into()),
@@ -234,6 +257,8 @@ mod tests {
         assert_eq!(
             command,
             Command::CaptureInit {
+                backend: None,
+                screen: None,
                 id: None,
                 edge: Some(Edge::Top),
                 restore_token: None,
@@ -253,6 +278,8 @@ mod tests {
         assert_eq!(
             command,
             Command::CaptureInit {
+                backend: None,
+                screen: None,
                 id: None,
                 edge: None,
                 restore_token: None,

@@ -139,8 +139,8 @@ LINUX_OPTIONS = (
     ),
     (
         "use_kernel_input",
-        "Use direct kernel input so remote control also works on the lock "
-        "screen (bypasses the desktop portal permission prompt)",
+        "Use direct kernel input for both directions: works on the lock screen "
+        "and never asks for desktop portal permission",
     ),
 )
 

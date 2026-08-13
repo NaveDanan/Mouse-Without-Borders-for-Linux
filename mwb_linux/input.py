@@ -178,6 +178,7 @@ class PortalBridge:
         targets: list[dict[str, object]] | None = None,
         backend: str = "portal",
         screen: list[int] | None = None,
+        capture_backend: str = "portal",
     ) -> None:
         executable = find_bridge()
         if not executable:
@@ -199,6 +200,8 @@ class PortalBridge:
                 "capture_init",
                 id="capture",
                 edge=edge,
+                backend=capture_backend,
+                screen=list(screen) if screen else None,
                 restore_token=capture_restore_token or None,
                 # Restricts the pointer barrier to the monitor the settings
                 # matrix places the Windows host against.
@@ -399,6 +402,7 @@ class InputManager:
                 targets=capture_targets(self.config),
                 backend=self.inject_backend,
                 screen=self.desktop_geometry(),
+                capture_backend=self.capture_backend,
             )
             self._started = True
             self._inject_ready = False
@@ -682,33 +686,9 @@ class InputManager:
                 self.status_callback(f"Input portal error: {error}")
                 return
             if event.get("id") == "capture":
-                result = event.get("result", {})
-                token = result.get("restore_token")
-                if token:
-                    self.config.capture_restore_token = token
-                    self.persist_config()
-                self._note_capture_persistence(result, bool(token))
-                zones = result.get("zones", [])
-                if zones:
-                    left = min(int(zone.get("x", 0)) for zone in zones)
-                    top = min(int(zone.get("y", 0)) for zone in zones)
-                    right = max(int(zone.get("x", 0)) + int(zone.get("width", 0)) for zone in zones)
-                    bottom = max(int(zone.get("y", 0)) + int(zone.get("height", 0)) for zone in zones)
-                    self.width = max(1, right - left)
-                    self.height = max(1, bottom - top)
-                self.status_callback("Screen-edge capture ready")
-                self._capture_ready = True
-                self._capture_enabled = True
-                self.retry_pending_switch()
+                self.apply_capture_result(event.get("result", {}))
             elif event.get("id") == "inject":
-                token = event.get("result", {}).get("restore_token")
-                if token:
-                    self.config.inject_restore_token = token
-                    self.persist_config()
-                self._inject_ready = True
-                self._inject_started = True
-                self.injection_paused = False
-                self.status_callback("Remote input permission ready")
+                self.apply_inject_result(event.get("result", {}))
             return
         event_type = event.get("event")
         if event_type == "capture_activated":
@@ -759,6 +739,18 @@ class InputManager:
                 self.inject_y = float(top)
                 self.inject_width = float(right - left)
                 self.inject_height = float(bottom - top)
+        elif event_type == "capture_devices_changed":
+            devices = event.get("devices", [])
+            LOGGER.info(
+                "screen-edge capture now watches %d input devices: %s",
+                len(devices),
+                ", ".join(str(name) for name in devices),
+            )
+        elif event_type == "capture_backend_fallback":
+            self.status_callback(
+                "Direct kernel capture unavailable, using the portal: "
+                f"{event.get('reason', 'unknown')}"
+            )
         elif event_type == "inject_backend_fallback":
             self.status_callback(
                 "Direct kernel input unavailable, using the portal: "
@@ -782,9 +774,18 @@ class InputManager:
         elif event_type == "capture_error":
             self._capture_ready = False
             self._capture_enabled = False
-            self.status_callback(
-                f"Screen-edge capture interrupted: {event.get('error', 'unknown')}"
-            )
+            if self.session_locked:
+                # The compositor always drops the capture session at the lock
+                # screen. Saying so here would bury the far more useful report
+                # of whether remote input still reaches this PC.
+                LOGGER.info(
+                    "screen-edge capture ended with the lock screen: %s",
+                    event.get("error", "unknown"),
+                )
+            else:
+                self.status_callback(
+                    f"Screen-edge capture interrupted: {event.get('error', 'unknown')}"
+                )
             self._schedule_session_recovery()
         elif event_type == "bridge_stopped":
             self.status_callback("Input portal helper stopped; restarting")
@@ -875,20 +876,15 @@ class InputManager:
                 LOGGER.info("remote input session not restorable yet: %s", exc)
                 recovered = False
             else:
-                token = response.get("result", {}).get("restore_token")
-                if token:
-                    self.config.inject_restore_token = token
-                    self.persist_config()
-                self._inject_ready = True
-                self._inject_started = True
-                self.injection_paused = False
-                self.status_callback("Remote input permission ready")
+                self.apply_inject_result(response.get("result", {}))
         if self.config.edge_switching and not self._capture_ready:
             try:
-                self.bridge.request(
+                response = self.bridge.request(
                     "capture_init",
                     timeout=60.0,
                     edge=self.config.host_position,
+                    backend=self.capture_backend,
+                    screen=self.desktop_geometry(),
                     restore_token=self.config.capture_restore_token or None,
                     zone=list(self.config.host_zone) if self.config.host_zone else None,
                     targets=capture_targets(self.config) or None,
@@ -896,7 +892,48 @@ class InputManager:
             except (ConnectionError, TimeoutError) as exc:
                 LOGGER.info("screen-edge capture not restorable yet: %s", exc)
                 recovered = False
+            else:
+                self.apply_capture_result(response.get("result", {}))
         return recovered
+
+    def apply_capture_result(self, result: dict) -> None:
+        """Record a started capture session, however it was requested.
+
+        Recovery re-arms the session with its own request id, so this
+        bookkeeping cannot live in the branch that only matches the initial
+        "capture" id: doing so left the session running while the daemon still
+        believed capture was dead.
+        """
+
+        token = result.get("restore_token")
+        if token:
+            self.config.capture_restore_token = token
+            self.persist_config()
+        self._note_capture_persistence(result, bool(token))
+        zones = result.get("zones", [])
+        if zones:
+            left = min(int(zone.get("x", 0)) for zone in zones)
+            top = min(int(zone.get("y", 0)) for zone in zones)
+            right = max(int(zone.get("x", 0)) + int(zone.get("width", 0)) for zone in zones)
+            bottom = max(int(zone.get("y", 0)) + int(zone.get("height", 0)) for zone in zones)
+            self.width = max(1, right - left)
+            self.height = max(1, bottom - top)
+        self.status_callback("Screen-edge capture ready")
+        self._capture_ready = True
+        self._capture_enabled = True
+        self.retry_pending_switch()
+
+    def apply_inject_result(self, result: dict) -> None:
+        """Record a started injection session, however it was requested."""
+
+        token = result.get("restore_token")
+        if token:
+            self.config.inject_restore_token = token
+            self.persist_config()
+        self._inject_ready = True
+        self._inject_started = True
+        self.injection_paused = False
+        self.status_callback("Remote input permission ready")
 
     @property
     def inject_backend(self) -> str:
@@ -918,6 +955,14 @@ class InputManager:
         return [0, 0, max(1, int(self.width)), max(1, int(self.height))]
 
     @property
+    def capture_backend(self) -> str:
+        """Return the screen-edge capture path the user configured."""
+
+        if self.config.other_options.get("use_kernel_input"):
+            return "evdev"
+        return "portal"
+
+    @property
     def injection_survives_lock(self) -> bool:
         """A kernel input device is not revoked when the session locks."""
 
@@ -937,7 +982,11 @@ class InputManager:
         except (TypeError, ValueError):
             version = 0
         self.capture_portal_version = version
-        self.capture_persistable = bool(stored_token) or version >= CAPTURE_PERSIST_VERSION
+        self.capture_persistable = (
+            bool(stored_token)
+            or bool(result.get("persistent"))
+            or version >= CAPTURE_PERSIST_VERSION
+        )
         if self.capture_persistable or self._capture_persistence_reported:
             return
         self._capture_persistence_reported = True

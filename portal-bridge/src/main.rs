@@ -3,21 +3,31 @@
 
 use anyhow::{Result, anyhow, bail};
 use mwb_portal_bridge::capture::{CaptureHandle, CaptureTargetSpec, Zone, start_capture};
+use mwb_portal_bridge::evdev::Bounds;
+use mwb_portal_bridge::evdev_capture::{EvdevCaptureHandle, start_evdev_capture};
 use mwb_portal_bridge::inject::{InjectAction, InjectionHandle, start_injection};
 use mwb_portal_bridge::protocol::{
-    CaptureTarget, Command, Edge, InjectBackend, event, response_error, response_ok,
+    CaptureBackend, CaptureTarget, Command, Edge, InjectBackend, event, response_error, response_ok,
 };
 use mwb_portal_bridge::uinput::{UinputInjector, availability_error};
 use serde_json::{Value, json};
+use std::rc::Rc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
 struct Bridge {
     capture: Option<CaptureHandle>,
+    /// Screen-edge capture read straight from the input devices. Mutually
+    /// exclusive with `capture`, which is the portal path.
+    evdev_capture: Option<EvdevCaptureHandle>,
     injection: Option<InjectionHandle>,
     /// Kernel-level injection, used instead of the portal when selected. It
     /// survives the lock screen, which no portal session can.
     uinput: Option<UinputInjector>,
+    /// Set while a session is being created. Initialization runs off the
+    /// command loop, so this is what stops a second request racing it.
+    capture_initializing: bool,
+    inject_initializing: bool,
     output: mpsc::Sender<Value>,
 }
 
@@ -25,8 +35,11 @@ impl Bridge {
     fn new(output: mpsc::Sender<Value>) -> Self {
         Self {
             capture: None,
+            evdev_capture: None,
             injection: None,
             uinput: None,
+            capture_initializing: false,
+            inject_initializing: false,
             output,
         }
     }
@@ -46,25 +59,18 @@ impl Bridge {
                 json!({ "pong": true, "version": env!("CARGO_PKG_VERSION") }),
                 false,
             )),
-            Command::CaptureInit {
-                edge,
-                restore_token,
-                zone,
-                targets,
-                ..
-            } => {
-                if !self.discard_dead_capture() {
-                    return Err(anyhow!("input capture is already initialized"));
-                }
-                let targets = capture_target_specs(edge, zone, targets)?;
-                let (handle, info) =
-                    start_capture(targets, restore_token, self.output.clone()).await?;
-                self.capture = Some(handle);
-                Ok((info, false))
+            Command::CaptureInit { .. } | Command::InjectInit { .. } => {
+                // Routed off the command loop by run(); reaching here means a
+                // dispatch path was missed.
+                Err(anyhow!("session initialization is handled asynchronously"))
             }
             Command::CaptureRelease {
                 cursor_position, ..
             } => {
+                if let Some(evdev) = self.evdev_capture.as_ref() {
+                    evdev.release(cursor_position).await?;
+                    return Ok((json!({ "released": true }), false));
+                }
                 self.capture
                     .as_ref()
                     .ok_or_else(|| anyhow!("input capture is not initialized"))?
@@ -73,6 +79,10 @@ impl Bridge {
                 Ok((json!({ "released": true }), false))
             }
             Command::CaptureEnable { .. } => {
+                if let Some(evdev) = self.evdev_capture.as_ref() {
+                    evdev.enable().await?;
+                    return Ok((json!({ "enabled": true }), false));
+                }
                 self.capture
                     .as_ref()
                     .ok_or_else(|| anyhow!("input capture is not initialized"))?
@@ -81,6 +91,10 @@ impl Bridge {
                 Ok((json!({ "enabled": true }), false))
             }
             Command::CaptureDisable { .. } => {
+                if let Some(evdev) = self.evdev_capture.as_ref() {
+                    evdev.disable().await?;
+                    return Ok((json!({ "disabled": true }), false));
+                }
                 self.capture
                     .as_ref()
                     .ok_or_else(|| anyhow!("input capture is not initialized"))?
@@ -89,59 +103,16 @@ impl Bridge {
                 Ok((json!({ "disabled": true }), false))
             }
             Command::CaptureStop { .. } => {
+                if let Some(evdev) = self.evdev_capture.take() {
+                    evdev.stop().await?;
+                    return Ok((json!({ "stopped": true }), false));
+                }
                 let capture = self
                     .capture
                     .take()
                     .ok_or_else(|| anyhow!("input capture is not initialized"))?;
                 capture.stop().await?;
                 Ok((json!({ "stopped": true }), false))
-            }
-            Command::InjectInit {
-                restore_token,
-                backend,
-                screen,
-                ..
-            } => {
-                if self.uinput.is_some() {
-                    return Err(anyhow!("input injection is already initialized"));
-                }
-                if !self.discard_dead_injection() {
-                    return Err(anyhow!("input injection is already initialized"));
-                }
-                let backend = backend.unwrap_or_default();
-                if matches!(backend, InjectBackend::Uinput | InjectBackend::Auto) {
-                    let screen = screen
-                        .ok_or_else(|| anyhow!("uinput injection needs the desktop geometry"))?;
-                    match UinputInjector::new(screen) {
-                        Ok(injector) => {
-                            let info = injector.describe();
-                            self.uinput = Some(injector);
-                            return Ok((info, false));
-                        }
-                        Err(error) if matches!(backend, InjectBackend::Uinput) => {
-                            return Err(error);
-                        }
-                        Err(error) => {
-                            // Auto: report why and continue with the portal so
-                            // a machine without uinput access still works.
-                            self.output
-                                .send(event(
-                                    "inject_backend_fallback",
-                                    json!({
-                                        "requested": "uinput",
-                                        "using": "portal",
-                                        "reason": availability_error()
-                                            .unwrap_or_else(|| format!("{error:#}")),
-                                    }),
-                                ))
-                                .await
-                                .ok();
-                        }
-                    }
-                }
-                let (handle, info) = start_injection(restore_token, self.output.clone()).await?;
-                self.injection = Some(handle);
-                Ok((info, false))
             }
             Command::InjectKey { keycode, state, .. } => {
                 self.inject(InjectAction::Key { keycode, state }).await?;
@@ -203,6 +174,17 @@ impl Bridge {
         }
     }
 
+    fn discard_dead_evdev_capture(&mut self) -> bool {
+        match &self.evdev_capture {
+            Some(capture) if capture.is_running() => false,
+            Some(_) => {
+                self.evdev_capture = None;
+                true
+            }
+            None => true,
+        }
+    }
+
     fn discard_dead_capture(&mut self) -> bool {
         match &self.capture {
             Some(capture) if capture.is_running() => false,
@@ -234,6 +216,13 @@ impl Bridge {
     async fn stop_all(&mut self) -> Result<()> {
         let mut errors = Vec::new();
         self.uinput = None;
+        // Release grabbed input devices before anything else can fail: a
+        // device left captured is a keyboard the user cannot get back.
+        if let Some(evdev) = self.evdev_capture.take()
+            && let Err(error) = evdev.stop().await
+        {
+            errors.push(format!("evdev capture: {error:#}"));
+        }
         if let Some(capture) = self.capture.take()
             && let Err(error) = capture.stop().await
         {
@@ -250,6 +239,166 @@ impl Bridge {
             Err(anyhow!(errors.join("; ")))
         }
     }
+}
+
+/// Create a capture session without blocking the command loop.
+///
+/// A portal request can wait on a consent dialog for as long as the user
+/// takes. Holding the loop for that would also hold back `capture_release`,
+/// which is what hands grabbed input devices back, so this runs on its own
+/// task and answers when it is done.
+async fn initialize_capture(bridge: Rc<Mutex<Bridge>>, command: Command) -> Result<Value> {
+    let Command::CaptureInit {
+        edge,
+        restore_token,
+        zone,
+        targets,
+        backend,
+        screen,
+        ..
+    } = command
+    else {
+        bail!("expected a capture_init command");
+    };
+    let output = {
+        let mut bridge = bridge.lock().await;
+        if bridge.capture_initializing
+            || !bridge.discard_dead_evdev_capture()
+            || !bridge.discard_dead_capture()
+        {
+            bail!("input capture is already initialized");
+        }
+        bridge.capture_initializing = true;
+        bridge.output.clone()
+    };
+    let result =
+        start_capture_session(edge, restore_token, zone, targets, backend, screen, &output).await;
+    let mut bridge = bridge.lock().await;
+    bridge.capture_initializing = false;
+    match result? {
+        StartedCapture::Evdev(handle, info) => {
+            bridge.evdev_capture = Some(handle);
+            Ok(info)
+        }
+        StartedCapture::Portal(handle, info) => {
+            bridge.capture = Some(handle);
+            Ok(info)
+        }
+    }
+}
+
+enum StartedCapture {
+    Evdev(EvdevCaptureHandle, Value),
+    Portal(CaptureHandle, Value),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_capture_session(
+    edge: Option<Edge>,
+    restore_token: Option<String>,
+    zone: Option<[i32; 4]>,
+    targets: Option<Vec<CaptureTarget>>,
+    backend: Option<CaptureBackend>,
+    screen: Option<[i32; 4]>,
+    output: &mpsc::Sender<Value>,
+) -> Result<StartedCapture> {
+    let targets = capture_target_specs(edge, zone, targets)?;
+    let backend = backend.unwrap_or_default();
+    if matches!(backend, CaptureBackend::Evdev | CaptureBackend::Auto) {
+        let screen = screen.ok_or_else(|| anyhow!("evdev capture needs the desktop geometry"))?;
+        let bounds = Bounds::new(screen[0], screen[1], screen[2], screen[3]);
+        match start_evdev_capture(
+            targets.clone(),
+            bounds,
+            std::path::PathBuf::from("/dev/input"),
+            output.clone(),
+        )
+        .await
+        {
+            Ok((handle, info)) => return Ok(StartedCapture::Evdev(handle, info)),
+            Err(error) if matches!(backend, CaptureBackend::Evdev) => return Err(error),
+            Err(error) => {
+                output
+                    .send(event(
+                        "capture_backend_fallback",
+                        json!({
+                            "requested": "evdev",
+                            "using": "portal",
+                            "reason": format!("{error:#}"),
+                        }),
+                    ))
+                    .await
+                    .ok();
+            }
+        }
+    }
+    let (handle, info) = start_capture(targets, restore_token, output.clone()).await?;
+    Ok(StartedCapture::Portal(handle, info))
+}
+
+/// Create an injection session without blocking the command loop.
+async fn initialize_injection(bridge: Rc<Mutex<Bridge>>, command: Command) -> Result<Value> {
+    let Command::InjectInit {
+        restore_token,
+        backend,
+        screen,
+        ..
+    } = command
+    else {
+        bail!("expected an inject_init command");
+    };
+    let output = {
+        let mut bridge = bridge.lock().await;
+        if bridge.inject_initializing || bridge.uinput.is_some() || !bridge.discard_dead_injection()
+        {
+            bail!("input injection is already initialized");
+        }
+        bridge.inject_initializing = true;
+        bridge.output.clone()
+    };
+    let backend = backend.unwrap_or_default();
+    if matches!(backend, InjectBackend::Uinput | InjectBackend::Auto) {
+        let screen = match screen {
+            Some(screen) => screen,
+            None => {
+                bridge.lock().await.inject_initializing = false;
+                bail!("uinput injection needs the desktop geometry");
+            }
+        };
+        match UinputInjector::new(screen) {
+            Ok(injector) => {
+                let info = injector.describe();
+                let mut bridge = bridge.lock().await;
+                bridge.inject_initializing = false;
+                bridge.uinput = Some(injector);
+                return Ok(info);
+            }
+            Err(error) if matches!(backend, InjectBackend::Uinput) => {
+                bridge.lock().await.inject_initializing = false;
+                return Err(error);
+            }
+            Err(error) => {
+                output
+                    .send(event(
+                        "inject_backend_fallback",
+                        json!({
+                            "requested": "uinput",
+                            "using": "portal",
+                            "reason": availability_error()
+                                .unwrap_or_else(|| format!("{error:#}")),
+                        }),
+                    ))
+                    .await
+                    .ok();
+            }
+        }
+    }
+    let result = start_injection(restore_token, output.clone()).await;
+    let mut bridge = bridge.lock().await;
+    bridge.inject_initializing = false;
+    let (handle, info) = result?;
+    bridge.injection = Some(handle);
+    Ok(info)
 }
 
 fn capture_target_specs(
@@ -314,7 +463,7 @@ async fn run() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     });
 
-    let mut bridge = Bridge::new(output.clone());
+    let bridge = Rc::new(Mutex::new(Bridge::new(output.clone())));
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -330,7 +479,32 @@ async fn run() -> Result<()> {
                 continue;
             }
         };
-        let (response, shutdown) = bridge.handle(command).await;
+        // Session creation can wait on a consent dialog indefinitely. Running
+        // it here would also hold back capture_release, which is what returns
+        // grabbed input devices, so it gets its own task and replies later.
+        if matches!(
+            command,
+            Command::CaptureInit { .. } | Command::InjectInit { .. }
+        ) {
+            let bridge = Rc::clone(&bridge);
+            let output = output.clone();
+            tokio::task::spawn_local(async move {
+                let id = command.id();
+                let is_capture = matches!(command, Command::CaptureInit { .. });
+                let result = if is_capture {
+                    initialize_capture(bridge, command).await
+                } else {
+                    initialize_injection(bridge, command).await
+                };
+                let response = match result {
+                    Ok(info) => response_ok(id, info),
+                    Err(error) => response_error(id, format!("{error:#}")),
+                };
+                let _ = output.send(response).await;
+            });
+            continue;
+        }
+        let (response, shutdown) = bridge.lock().await.handle(command).await;
         output
             .send(response)
             .await
@@ -340,7 +514,7 @@ async fn run() -> Result<()> {
         }
     }
 
-    if let Err(error) = bridge.stop_all().await {
+    if let Err(error) = bridge.lock().await.stop_all().await {
         eprintln!("portal bridge cleanup failed: {error:#}");
     }
     drop(bridge);
@@ -351,6 +525,44 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Session creation must never be answered on the command loop.
+    ///
+    /// A portal request can sit on a consent dialog indefinitely, and while it
+    /// does, capture_release cannot be processed; that release is what hands
+    /// grabbed keyboards and mice back to the user.
+    #[tokio::test]
+    async fn session_initialization_is_refused_on_the_command_loop() {
+        use super::*;
+        let (output, _rx) = mpsc::channel::<Value>(8);
+        let mut bridge = Bridge::new(output);
+        for command in [
+            Command::CaptureInit {
+                id: None,
+                edge: Some(Edge::Right),
+                restore_token: None,
+                zone: None,
+                targets: None,
+                backend: None,
+                screen: None,
+            },
+            Command::InjectInit {
+                id: None,
+                restore_token: None,
+                backend: None,
+                screen: None,
+            },
+        ] {
+            let (response, shutdown) = bridge.handle(command).await;
+            assert!(!shutdown);
+            assert_eq!(response["ok"], false);
+            let error = response["error"].as_str().unwrap();
+            assert!(
+                error.contains("asynchronously"),
+                "unexpected refusal: {error}"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

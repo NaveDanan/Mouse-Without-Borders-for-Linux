@@ -170,9 +170,9 @@ pub fn is_available() -> bool {
 pub fn availability_error() -> Option<String> {
     match OpenOptions::new().write(true).open(UINPUT_PATH) {
         Ok(_) => None,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Some(format!("{UINPUT_PATH} is missing; load the uinput kernel module"))
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(format!(
+            "{UINPUT_PATH} is missing; load the uinput kernel module"
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Some(format!(
             "no write access to {UINPUT_PATH}; add this user to the group owning it"
         )),
@@ -392,8 +392,8 @@ mod tests {
             eprintln!("skipping uinput device test: {:?}", availability_error());
             return;
         }
-        let injector = UinputInjector::new([0, 0, 1920, 1080])
-            .expect("the virtual devices should be created");
+        let injector =
+            UinputInjector::new([0, 0, 1920, 1080]).expect("the virtual devices should be created");
         let listed = std::fs::read_to_string("/proc/bus/input/devices")
             .expect("the kernel device list should be readable");
         for name in [

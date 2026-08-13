@@ -31,29 +31,29 @@ page. The release provides these files:
 
 | Distribution | x86-64 | ARM64 |
 | --- | --- | --- |
-| Debian/Ubuntu | `powertoys-mouse-without-borders_0.7.0_amd64.deb` | `powertoys-mouse-without-borders_0.7.0_arm64.deb` |
-| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.7.0-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.7.0-1.aarch64.rpm` |
-| Portable AppImage | `Mouse-Without-Borders-0.7.0-x86_64.AppImage` | `Mouse-Without-Borders-0.7.0-aarch64.AppImage` |
+| Debian/Ubuntu | `powertoys-mouse-without-borders_0.8.0_amd64.deb` | `powertoys-mouse-without-borders_0.8.0_arm64.deb` |
+| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.8.0-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.8.0-1.aarch64.rpm` |
+| Portable AppImage | `Mouse-Without-Borders-0.8.0-x86_64.AppImage` | `Mouse-Without-Borders-0.8.0-aarch64.AppImage` |
 
 Debian or Ubuntu:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.7.0_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.8.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
 Fedora or another RPM-based distribution:
 
 ```sh
-sudo dnf install ./powertoys-mouse-without-borders-0.7.0-1.x86_64.rpm
+sudo dnf install ./powertoys-mouse-without-borders-0.8.0-1.x86_64.rpm
 powertoys-mouse-without-borders
 ```
 
 Portable AppImage:
 
 ```sh
-chmod +x Mouse-Without-Borders-0.7.0-x86_64.AppImage
-./Mouse-Without-Borders-0.7.0-x86_64.AppImage
+chmod +x Mouse-Without-Borders-0.8.0-x86_64.AppImage
+./Mouse-Without-Borders-0.8.0-x86_64.AppImage
 ```
 
 Replace `amd64`/`x86_64` with `arm64`/`aarch64` on an ARM64 computer. The
@@ -96,7 +96,7 @@ APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
 Packages are written to `dist/`. Install a local DEB build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.7.0_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.8.0_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -213,8 +213,9 @@ peer is sharing the desktop. A manual lock still locks.
 
 ### Controlling the lock screen
 
-**Use direct kernel input** injects through `/dev/uinput` instead of the
-RemoteDesktop portal. The compositor destroys portal sessions when the screen
+**Use direct kernel input** replaces both portal paths at once: injection goes
+through `/dev/uinput` instead of the RemoteDesktop portal, and screen-edge
+capture reads `/dev/input` directly instead of the InputCapture portal. The compositor destroys portal sessions when the screen
 locks -- through the portal and through mutter's own private API alike -- so no
 portal client can type a password. A uinput device is indistinguishable from
 physical hardware at the evdev layer, so remote keyboard and mouse keep working
@@ -230,8 +231,18 @@ widening and is worth understanding before enabling. Delete
 withdraw the capability. When `/dev/uinput` is not writable the application
 reports why and continues on the portal.
 
-Screen-edge capture always uses the portal, so enabling kernel input does not
-remove the capture consent prompt.
+Because neither direction is a portal session any more, nothing is destroyed
+by the lock screen and **no permission prompt is ever shown**, including after
+unlocking. Edge detection works differently from the portal's exact barriers:
+evdev reports raw device deltas before pointer acceleration, so the position
+estimate is clamped to the desktop exactly as the real cursor is, and a
+crossing is reported when an already-pinned pointer keeps pushing outward.
+
+While capturing, the keyboard, mouse and touchpad are held exclusively with
+`EVIOCGRAB` so local input does not reach this desktop. Devices are handed back
+on release, on shutdown, if the process exits for any reason, and by a watchdog
+that ends a capture the application has stopped managing. Devices plugged in or
+removed are picked up automatically while capture is idle.
 
 When the screen does lock, remote input is reported as unavailable rather than
 silently dropped, and only the sessions the compositor actually destroyed are

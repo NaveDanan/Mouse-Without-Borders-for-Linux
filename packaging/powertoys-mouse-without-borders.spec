@@ -92,6 +92,9 @@ install -m 0644 THIRD-PARTY-NOTICES.md \
 %{_udevrulesdir}/60-powertoys-mouse-without-borders-uinput.rules
 
 %changelog
+* Fri Aug 14 2026 Nave Danan <nave0712@gmail.com> - 0.8.0-1
+- Capture screen edges from /dev/input so no permission prompt is needed.
+
 * Fri Aug 14 2026 Nave Danan <nave0712@gmail.com> - 0.7.0-1
 - Add opt-in kernel input injection that works on the lock screen.
 

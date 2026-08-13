@@ -470,8 +470,8 @@ class BackgroundServiceTests(unittest.TestCase):
 class UpdateUiTests(unittest.TestCase):
     def setUp(self):
         self.release = UpdateRelease(
-            version="0.7.0",
-            tag="v0.7.0",
+            version="0.8.0",
+            tag="v0.8.0",
             page_url="https://example.invalid/release",
             asset_name="update.deb",
             asset_url="https://example.invalid/update.deb",
@@ -530,7 +530,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, None, True, True)
 
-        form.update_status.set_text.assert_called_once_with("Up to date (0.7.0)")
+        form.update_status.set_text.assert_called_once_with("Up to date (0.8.0)")
 
     def test_new_version_is_announced_once(self):
         form = SimpleNamespace(
@@ -544,7 +544,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, self.release, False, True)
 
-        form.update_status.set_text.assert_called_once_with("Version 0.7.0 available")
+        form.update_status.set_text.assert_called_once_with("Version 0.8.0 available")
         form._show_update_available.assert_called_once_with(self.release)
 
     def test_update_dialog_shows_current_and_latest_versions(self):
@@ -555,8 +555,8 @@ class UpdateUiTests(unittest.TestCase):
 
         form.present.assert_called_once_with()
         detail = dialog.set_detail.call_args.args[0]
-        self.assertIn("Current version: 0.7.0", detail)
-        self.assertIn("Latest version: 0.7.0", detail)
+        self.assertIn("Current version: 0.8.0", detail)
+        self.assertIn("Latest version: 0.8.0", detail)
         dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
 
     def test_failed_install_keeps_the_application_open(self):

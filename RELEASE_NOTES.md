@@ -1,73 +1,93 @@
-# Control the lock screen from the remote computer
+# Switch machines without a permission prompt
 
-The desktop portal cannot reach a locked Linux session. When the screen locks,
-the compositor destroys every injected input device, so remote keyboard and
-mouse stop at the lock screen and there is no way to log back in from the
-other computer. This release adds an optional path that does not have that
-limitation, and fixes a settings bug that could stop an older install from
-starting.
+Screen-edge capture can now read the input devices directly instead of going
+through the InputCapture portal. That removes the last reason Mouse Without
+Borders had to interrupt you: the "Capture Input" dialog that reappeared every
+time you unlocked the screen.
 
-## Direct kernel input
+## Why the prompt kept coming back
 
-**Use direct kernel input**, under *Other Options -> Linux Power*, injects
-through `/dev/uinput` instead of the RemoteDesktop portal. A uinput device is
-indistinguishable from physical hardware at the evdev layer, so the lock screen
-accepts it exactly like a real keyboard: remote control keeps working while the
-screen is locked, and typing the password from the remote computer logs the
-machine back in.
+The compositor destroys a portal capture session whenever the screen locks, and
+InputCapture interface version 1 has no restore token to rebuild it silently.
+Version 2 added one, but the portal frontend only advertises
+`MIN(impl_version, 2)`, and no released desktop backend implements it —
+`xdg-desktop-portal-gnome` 46 through 50 all lack `CreateSession2`,
+`restore_token` and `persist_mode`. So on every unlock the session had to be
+recreated, and recreating it meant asking again.
 
-Measured on GNOME 46 / Wayland, driving the real bridge with the backend
-enabled: after locking the session, keystrokes sent as ordinary `inject_key`
-commands reached the lock screen and were evaluated by PAM, which logged the
-expected failure for a deliberately wrong password. Absolute pointer
-positioning was verified separately against a fullscreen window and landed on
-the exact requested pixel for every sample.
+Reading `/dev/input` sidesteps that entirely. There is no session for a lock
+screen to take away, so **no prompt is shown, ever**. Together with the kernel
+injection added in 0.7.0, enabling *Use direct kernel input* now replaces both
+portal paths, and the option covers both directions.
 
-Three virtual devices are created rather than one, because libinput classifies
-a device by the axes it advertises and mixing relative with absolute pointer
-axes on a single node is ambiguous.
+### How edge detection works without the portal
 
-### Why it is off by default
+The portal reports exact barrier crossings. evdev reports raw device deltas
+before the compositor applies pointer acceleration, so a running position
+estimate drifts from the real cursor and cannot be compared directly. Instead
+only *overshoot* is counted: the part of a movement the desktop boundary
+clipped. The compositor clips the real cursor at the same boundary, so
+overshoot is the one quantity both agree on. Travelling to the edge is not a
+crossing, a small nudge past it is not either, sustained pressure is, and a
+hard flick into the edge crosses immediately.
 
-Kernel input steps outside the portal's per-session consent model. Once
-enabled there is no permission prompt, and the packaged udev rule lets any
-process running as a user in the `input` group synthesise input, including into
-the lock screen. That group already owns `/dev/input/event*`, so on most
-systems this grants no new access to physical input devices, but it is a real
-widening and is worth understanding before turning it on. Removing
-`/usr/lib/udev/rules.d/60-powertoys-mouse-without-borders-uinput.rules`
-withdraws the capability.
+### Holding the devices safely
 
-The portal remains the default and nothing changes for existing installs.
-Where `/dev/uinput` cannot be opened the application reports the reason and
-continues on the portal rather than failing. Screen-edge capture always uses
-the portal, so enabling kernel input does not remove the capture prompt.
+While capturing, the keyboard, mouse and touchpad are held exclusively with
+`EVIOCGRAB`, so local input does not reach this desktop. Since a device left
+grabbed is a keyboard the user cannot get back, release is unconditional: on
+request, on shutdown, when the owning object is dropped, if the process exits
+for any reason, and through a watchdog that ends a capture the application has
+stopped managing. Devices plugged in or unplugged are picked up automatically
+while capture is idle.
 
-## Settings from a newer release no longer break an older one
+## Session setup no longer blocks the command loop
 
-`Config.validate()` rejected any unrecognised entry in `other_options` or
-`hotkeys` outright. Because a newer release writes its own keys into the shared
-settings file, downgrading, or simply running an older install afterwards, made
-it fail to start with `unknown options: ...`. Unrecognised entries are now kept
-and reported instead of being fatal, matching how unknown top-level fields were
-already tolerated, and they survive a save so upgrading again restores the
-choice. Hotkey values are only range-checked for hotkeys this version knows, so
-a future release may widen them safely.
+Creating a portal session can wait on a consent dialog for as long as the user
+takes, and the bridge processed commands strictly in order, so everything
+behind it waited too — including the release that hands grabbed input devices
+back. Measured before the fix: with a portal injection request pending,
+`capture_release` never completed; with no dialog involved it returned at once.
+Session creation now runs off the command loop, so control commands are always
+answered. This was a pre-existing ordering problem that only became dangerous
+once a command could be holding a keyboard.
+
+## Also fixed
+
+- **Touchpad tool codes were forwarded as keystrokes.** A captured touchpad
+  reports `BTN_TOUCH` and `BTN_TOOL_FINGER` continuously; those sit outside the
+  mouse-button range and were being sent as key presses, typing nonsense on the
+  remote computer. Non-mouse button codes are now dropped.
+- **System buttons were classified as keyboards.** Power buttons, the video
+  bus, and vendor hotkey arrays all report a few key codes. Grabbing them would
+  have taken away the power and brightness keys, so a keyboard now has to carry
+  actual letter keys.
+- **Recovery re-armed capture without recording it.** The recovery path issued
+  `capture_init` with its own request id, so the reply bypassed the bookkeeping
+  that marks capture ready and stores its zones: the session was recreated, and
+  the application still believed capture was dead.
+- **An expected lock-screen teardown replaced a more useful status.** Losing
+  the capture session while locked is normal, and saying so buried the report
+  of whether remote input still worked.
+- **Idle devices could block a read.** Input devices are opened non-blocking so
+  polling several of them cannot stall on one nobody is touching.
 
 ## Verification
 
-- 246 Python tests and 34 Rust tests pass; Clippy is clean and AppStream
+- 254 Python tests and 66 Rust tests pass; Clippy is clean and AppStream
   metadata validates.
-- The lock-screen path was exercised through the production bridge, not a
-  prototype, and confirmed from PAM's own log.
-- A Rust test asserts the kernel registers all three virtual devices, and skips
-  where `/dev/uinput` is not writable, such as on a build machine.
-- Unit tests cover the `uinput_user_dev` payload layout, absolute-axis ranging,
-  device-name truncation, backend selection, portal fallback reporting and the
-  lock-screen behaviour of each backend.
+- Exercised through the production bridge on real hardware: an edge crossing
+  activated capture at the desktop boundary, pointer events were forwarded
+  while held, and the devices were released on request.
+- Capture was confirmed to receive every event a device emits, and the release
+  path was re-tested in the exact configuration that previously hung.
+- Hotplug was verified by adding and removing a device mid-session.
+- Device classification was checked against a real laptop, where only the
+  typing keyboard, the mouse node and the touchpad are selected, and the
+  application's own virtual devices are excluded so capture cannot feed
+  injection back into itself.
 
-No visual change other than one new checkbox under *Other Options -> Linux
-Power*.
+No visual change beyond the wording of one checkbox.
 
 ## Packages
 

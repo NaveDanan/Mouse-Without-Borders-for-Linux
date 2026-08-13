@@ -28,6 +28,16 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.0" date="2026-08-14">
+      <description>
+        <p>
+          Read screen-edge capture straight from the input devices so switching
+          machines no longer needs a desktop portal permission prompt after
+          every lock, and keep session setup off the command loop so grabbed
+          keyboards are always handed back promptly.
+        </p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-08-14">
       <description>
         <p>
