@@ -100,6 +100,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           pattern: packages-*
@@ -115,8 +117,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_title=$(sed -n 's/^# //p' RELEASE_NOTES.md | head -n 1)
+          test -n "$release_title"
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME Mouse without Borders for linux" \
-            --generate-notes \
+            --title "$GITHUB_REF_NAME — $release_title" \
+            --notes-file RELEASE_NOTES.md \
             --latest

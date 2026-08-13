@@ -184,6 +184,7 @@ class MouseWithoutBordersService:
             )
         else:
             self.input.config = self.config
+        self._sync_sleep_inhibitor()
         if self._connection_requested:
             self.connection.start()
         else:
@@ -213,12 +214,22 @@ class MouseWithoutBordersService:
                 except OSError as exc:
                     self._input_status(f"File transfer unavailable: {exc}")
             if self.power:
-                self.power.set_connected(
-                    True,
-                    block_sleep=bool(
-                        self.config.other_options.get("block_screen_saver", True)
-                    ),
-                )
+                self._sync_sleep_inhibitor()
+
+    def _sync_sleep_inhibitor(self) -> None:
+        """Protect the full Connect intent, including transient reconnects."""
+
+        if not self.power:
+            return
+        configured = bool(
+            self.config.resolve_hosts() and len(self.config.secret) >= SECRET_LENGTH
+        )
+        self.power.set_connected(
+            self._connection_requested and configured,
+            block_sleep=bool(
+                self.config.other_options.get("block_screen_saver", True)
+            ),
+        )
 
     def _stop_connection(self) -> None:
         if self.connection:
@@ -277,6 +288,7 @@ class MouseWithoutBordersService:
             self.clipboard = None
 
         self.config = candidate
+        self._sync_sleep_inhibitor()
         if self.input:
             self.input.config = candidate
             configured_names = {
@@ -331,8 +343,6 @@ class MouseWithoutBordersService:
         elif self.connection and self.connection.connected:
             state = "connected"
             message = f"{len(self.connection.peers)} connected; {message}"
-        if self.power and not (self.connection and self.connection.connected):
-            self.power.set_connected(False)
         self._set_status(state, message)
 
     def _input_status(self, message: str) -> None:
@@ -423,6 +433,8 @@ class MouseWithoutBordersService:
                 and packet.dest in (self.config.machine_id, ID_ALL)
             ):
                 self.power.remote_activity()
+                if self.input:
+                    self.input.wake_display()
             if packet.machine_name:
                 peer.info.name = packet.machine_name
             if packet.src not in (0, ID_ALL):
@@ -500,7 +512,7 @@ class MouseWithoutBordersService:
         if self.file_transfer:
             self.file_transfer.stop()
         if self.power:
-            self.power.set_connected(False)
+            self._sync_sleep_inhibitor()
         self._stop_connection()
         self._set_status("disconnected", "Disconnected")
 
@@ -524,7 +536,7 @@ class MouseWithoutBordersService:
             self.file_transfer.stop()
             self.file_transfer = None
         if self.power:
-            self.power.set_connected(False)
+            self._sync_sleep_inhibitor()
         self._set_status("dormant", "Exited; mouse and keyboard sharing stopped")
 
     def _transfer_peer_by_id(self, machine_id: int) -> TransferPeer | None:

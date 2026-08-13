@@ -28,6 +28,16 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.5" date="2026-08-13">
+      <description>
+        <p>
+          Keep suspend protection active across network reconnects, wake the
+          GNOME lock screen from remote input, and preserve live portal grants
+          across forced-suspend recovery to avoid unnecessary permission
+          prompts.
+        </p>
+      </description>
+    </release>
     <release version="0.5.4" date="2026-08-13">
       <description>
         <p>

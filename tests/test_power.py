@@ -47,6 +47,37 @@ class PowerTests(unittest.TestCase):
         self.assertEqual(arguments[0], "org.freedesktop.ScreenSaver")
         self.assertEqual(arguments[3], "SimulateUserActivity")
 
+    def test_gnome_not_supported_activity_wakes_active_lock_screen(self):
+        connection = Mock()
+        connection.call_sync.side_effect = [
+            GLib.Error("not supported"),
+            GLib.Variant("(b)", (True,)),
+            GLib.Variant("(u)", (17,)),
+        ]
+        manager = PowerManager()
+
+        with patch("mwb_linux.power.Gio.bus_get_sync", return_value=connection):
+            manager._signal_activity()
+
+        self.assertEqual(connection.call_sync.call_count, 3)
+        activity, active, notification = connection.call_sync.call_args_list
+        self.assertEqual(activity.args[3], "SimulateUserActivity")
+        self.assertEqual(active.args[0], "org.gnome.ScreenSaver")
+        self.assertEqual(active.args[3], "GetActive")
+        self.assertEqual(notification.args[0], "org.freedesktop.Notifications")
+        self.assertEqual(notification.args[3], "Notify")
+        self.assertEqual(manager._wake_notification_id, 17)
+
+    def test_gnome_fallback_does_not_notify_an_awake_desktop(self):
+        connection = Mock()
+        connection.call_sync.return_value = GLib.Variant("(b)", (False,))
+        manager = PowerManager()
+
+        manager._wake_gnome_lock_screen(connection)
+
+        self.assertEqual(connection.call_sync.call_count, 1)
+        self.assertEqual(connection.call_sync.call_args.args[3], "GetActive")
+
 
 if __name__ == "__main__":
     unittest.main()

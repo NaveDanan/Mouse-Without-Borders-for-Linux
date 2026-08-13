@@ -208,6 +208,63 @@ class InputTests(unittest.TestCase):
             [command[0] for command in bridge.commands].count("start"), 2
         )
 
+    def test_suspend_resume_preserves_a_live_portal_session(self):
+        bridge = FakeBridge()
+        messages = []
+        manager = InputManager(
+            Config(machine_name="linux", machine_id=10),
+            lambda _packet: None,
+            lambda: 20,
+            messages.append,
+            bridge=bridge,
+        )
+        manager._desired = True
+        manager._started = True
+        manager._capture_ready = True
+
+        manager.resume_after_suspend()
+
+        self.assertEqual(bridge.commands, [("ping", {"timeout": 3.0})])
+        self.assertTrue(manager._started)
+        self.assertTrue(manager._capture_ready)
+        self.assertEqual(messages[-1], "Remote input session resumed")
+
+    def test_suspend_resume_restarts_a_dead_portal_bridge(self):
+        bridge = FakeBridge()
+        bridge.request = Mock(side_effect=ConnectionError("bridge stopped"))
+        manager = InputManager(
+            Config(machine_name="linux", machine_id=10),
+            lambda _packet: None,
+            lambda: 20,
+            lambda _message: None,
+            bridge=bridge,
+        )
+        manager._desired = True
+        manager._started = True
+
+        with patch.object(manager, "_schedule_bridge_restart") as restart:
+            manager.resume_after_suspend()
+
+        restart.assert_called_once_with()
+
+    def test_awake_packet_activity_uses_the_existing_eis_session(self):
+        bridge = FakeBridge()
+        manager = InputManager(
+            Config(machine_name="linux", machine_id=10),
+            lambda _packet: None,
+            lambda: 20,
+            lambda _message: None,
+            bridge=bridge,
+        )
+        manager._started = True
+
+        manager.wake_display()
+
+        self.assertEqual(
+            bridge.commands,
+            [("inject_pointer_motion", {"dx": 0.0, "dy": 0.0})],
+        )
+
     def test_capture_restore_token_is_saved_for_portal_v2_relaunches(self):
         persisted = []
         config = Config(machine_name="linux", machine_id=10)

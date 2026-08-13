@@ -31,29 +31,29 @@ page. The release provides these files:
 
 | Distribution | x86-64 | ARM64 |
 | --- | --- | --- |
-| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.4_amd64.deb` | `powertoys-mouse-without-borders_0.5.4_arm64.deb` |
-| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.4-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.4-1.aarch64.rpm` |
-| Portable AppImage | `Mouse-Without-Borders-0.5.4-x86_64.AppImage` | `Mouse-Without-Borders-0.5.4-aarch64.AppImage` |
+| Debian/Ubuntu | `powertoys-mouse-without-borders_0.5.5_amd64.deb` | `powertoys-mouse-without-borders_0.5.5_arm64.deb` |
+| Fedora/RHEL-style | `powertoys-mouse-without-borders-0.5.5-1.x86_64.rpm` | `powertoys-mouse-without-borders-0.5.5-1.aarch64.rpm` |
+| Portable AppImage | `Mouse-Without-Borders-0.5.5-x86_64.AppImage` | `Mouse-Without-Borders-0.5.5-aarch64.AppImage` |
 
 Debian or Ubuntu:
 
 ```sh
-sudo apt install ./powertoys-mouse-without-borders_0.5.4_amd64.deb
+sudo apt install ./powertoys-mouse-without-borders_0.5.5_amd64.deb
 powertoys-mouse-without-borders
 ```
 
 Fedora or another RPM-based distribution:
 
 ```sh
-sudo dnf install ./powertoys-mouse-without-borders-0.5.4-1.x86_64.rpm
+sudo dnf install ./powertoys-mouse-without-borders-0.5.5-1.x86_64.rpm
 powertoys-mouse-without-borders
 ```
 
 Portable AppImage:
 
 ```sh
-chmod +x Mouse-Without-Borders-0.5.4-x86_64.AppImage
-./Mouse-Without-Borders-0.5.4-x86_64.AppImage
+chmod +x Mouse-Without-Borders-0.5.5-x86_64.AppImage
+./Mouse-Without-Borders-0.5.5-x86_64.AppImage
 ```
 
 Replace `amd64`/`x86_64` with `arm64`/`aarch64` on an ARM64 computer. The
@@ -96,7 +96,7 @@ APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
 Packages are written to `dist/`. Install a local DEB build with:
 
 ```sh
-sudo apt install ./dist/powertoys-mouse-without-borders_0.5.4_amd64.deb
+sudo apt install ./dist/powertoys-mouse-without-borders_0.5.5_amd64.deb
 powertoys-mouse-without-borders
 ```
 
@@ -182,16 +182,19 @@ awake packet before input. Wake-on-LAN must be enabled in the sleeping PC's
 firmware, network-adapter settings, and operating system, and both machines must
 be reachable on the same broadcast LAN.
 
-When **Block Screen Saver on other machines** is checked, an authenticated
-connection holds a logind sleep inhibitor on Linux. The display may still blank
-or lock, and incoming mouse, keyboard, or awake packets signal desktop user
-activity to wake the display, but the daemon and its TCP/EIS sessions remain
-available. This is necessary because a fully suspended userspace process cannot
-receive the mouse packet intended to wake it and stock Windows Mouse Without
-Borders does not send a Linux Wake-on-LAN packet. If the system is forcibly
-suspended anyway, stale sockets are discarded on resume, connections retry
-immediately, and portal input sessions are rebuilt with their saved permission
-tokens. Uncheck the option when normal automatic system suspend is preferred.
+When **Block Screen Saver on other machines** is checked, the Linux service
+holds a logind sleep inhibitor for the complete Connect/reconnect lifetime. The
+display may still blank or lock, and incoming mouse, keyboard, or awake packets
+signal desktop user activity to wake the display, but the daemon and its TCP/EIS
+sessions remain available. This is necessary because a fully suspended
+userspace process cannot receive the mouse packet intended to wake it and stock
+Windows Mouse Without Borders does not send a Linux Wake-on-LAN packet. If the
+system is forcibly suspended anyway, stale sockets are discarded and
+connections retry immediately on resume. Live portal sessions are preserved;
+only a session the compositor actually dropped is rebuilt with its saved token.
+InputCapture v1 has no restore tokens, so a real compositor/session loss on
+those desktops still requires approval. Uncheck the option when normal
+automatic system suspend is preferred.
 
 Base TCP port and encryption compatibility live at the bottom of the IP
 Mappings tab; the mapping table itself resolves a machine name to an address

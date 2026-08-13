@@ -759,13 +759,31 @@ class InputManager:
         ).start()
 
     def resume_after_suspend(self) -> None:
-        """Recreate compositor sessions after a forced system suspend."""
+        """Keep live compositor grants and restart only a dead bridge."""
 
         if not self._desired:
             return
         self.release_local()
-        self.status_callback("System resumed; restoring remote input permission")
-        self._schedule_bridge_restart()
+        self.status_callback("System resumed; checking remote input session")
+        try:
+            self.bridge.request("ping", timeout=3.0)
+            self.status_callback("Remote input session resumed")
+        except (ConnectionError, TimeoutError):
+            # The bridge's EIS loops report their own portal errors. A failed
+            # process-level ping is the only reason to discard both sessions;
+            # keeping a live InputCapture v1 session avoids another consent
+            # prompt because that portal version has no restore tokens.
+            self._schedule_bridge_restart()
+
+    def wake_display(self) -> None:
+        """Send harmless compositor activity for an incoming AWAKE packet."""
+
+        if not self._started:
+            return
+        try:
+            self.bridge.command("inject_pointer_motion", dx=0.0, dy=0.0)
+        except ConnectionError as exc:
+            LOGGER.debug("compositor wake injection unavailable: %s", exc)
 
     def _send_key(self, code: int, pressed: bool) -> None:
         mapped = evdev_to_windows(code, pressed)

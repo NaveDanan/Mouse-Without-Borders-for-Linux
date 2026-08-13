@@ -122,6 +122,57 @@ class ServiceTests(unittest.TestCase):
             service.power.remote_activity.assert_called_once_with()
             service.file_transfer.handle_remote_mouse.assert_called_once_with(0x202)
 
+    def test_awake_packet_wakes_gnome_and_the_existing_eis_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                machine_name="linux",
+                machine_id=100,
+                auto_connect=False,
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.input = Mock()
+            service.power = Mock()
+            packet = Packet()
+            packet.type = PackageType.AWAKE
+            packet.src = 200
+            packet.dest = 100
+
+            service._process_packet(Mock(), packet)
+
+            service.power.remote_activity.assert_called_once_with()
+            service.input.wake_display.assert_called_once_with()
+
+    def test_sleep_inhibitor_follows_connect_intent_across_socket_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            Config(
+                host="windows",
+                secret="0123456789abcdef",
+                auto_connect=False,
+            ).save(config_path)
+            service = MouseWithoutBordersService(config_path)
+            service.power = Mock()
+            service.connection = Mock(connected=False)
+            service._connection_requested = True
+
+            service._sync_sleep_inhibitor()
+            service.power.set_connected.assert_called_once_with(
+                True, block_sleep=True
+            )
+
+            service.power.reset_mock()
+            service._connection_status("disconnected", "Connection closed; reconnecting")
+            service.power.set_connected.assert_not_called()
+
+            service._connection_requested = False
+            service._sync_sleep_inhibitor()
+            service.power.set_connected.assert_called_once_with(
+                False, block_sleep=True
+            )
+
     def test_drag_control_packets_are_forwarded_to_file_transfer(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -142,7 +193,7 @@ class ServiceTests(unittest.TestCase):
             service._process_packet(Mock(), packet)
             self.assertEqual(service.file_transfer.process_packet.call_count, 2)
 
-    def test_suspend_resume_rebuilds_the_portal_input_session(self):
+    def test_suspend_resume_checks_the_portal_input_session(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             Config(auto_connect=False).save(config_path)

@@ -17,7 +17,15 @@ LOGIN1_MANAGER = "org.freedesktop.login1.Manager"
 SCREENSAVER_NAME = "org.freedesktop.ScreenSaver"
 SCREENSAVER_PATH = "/org/freedesktop/ScreenSaver"
 SCREENSAVER_INTERFACE = "org.freedesktop.ScreenSaver"
+GNOME_SCREENSAVER_NAME = "org.gnome.ScreenSaver"
+GNOME_SCREENSAVER_PATH = "/org/gnome/ScreenSaver"
+GNOME_SCREENSAVER_INTERFACE = "org.gnome.ScreenSaver"
+NOTIFICATIONS_NAME = "org.freedesktop.Notifications"
+NOTIFICATIONS_PATH = "/org/freedesktop/Notifications"
+NOTIFICATIONS_INTERFACE = "org.freedesktop.Notifications"
+DESKTOP_ID = "io.github.NaveDanan.MouseWithoutBorders"
 ACTIVITY_INTERVAL = 0.5
+LOCK_SCREEN_WAKE_INTERVAL = 5.0
 
 
 class PowerManager:
@@ -38,6 +46,8 @@ class PowerManager:
         self._connected = False
         self._activity_pending = False
         self._last_activity = 0.0
+        self._last_lock_screen_wake = 0.0
+        self._wake_notification_id = 0
 
     @property
     def sleep_inhibited(self) -> bool:
@@ -116,28 +126,91 @@ class PowerManager:
     def _signal_activity(self) -> None:
         try:
             connection = self._session_bus or Gio.bus_get_sync(Gio.BusType.SESSION, None)
-            connection.call_sync(
-                SCREENSAVER_NAME,
-                SCREENSAVER_PATH,
-                SCREENSAVER_INTERFACE,
-                "SimulateUserActivity",
+            self._session_bus = connection
+            try:
+                connection.call_sync(
+                    SCREENSAVER_NAME,
+                    SCREENSAVER_PATH,
+                    SCREENSAVER_INTERFACE,
+                    "SimulateUserActivity",
+                    None,
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    750,
+                    None,
+                )
+            except GLib.Error as exc:
+                # GNOME exposes this freedesktop compatibility method but
+                # deliberately returns NotSupported. A transient notification
+                # is its supported, lock-preserving path to the shell's
+                # WakeUpScreen signal. Only use it while the screen shield is
+                # active, and rate-limit it while pointer packets are flowing.
+                LOGGER.debug("desktop activity signal unavailable: %s", exc)
+                self._wake_gnome_lock_screen(connection)
+        except GLib.Error as exc:
+            LOGGER.debug("desktop wake signal unavailable: %s", exc)
+        finally:
+            with self._lock:
+                self._activity_pending = False
+
+    def _wake_gnome_lock_screen(self, connection: Gio.DBusConnection) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_lock_screen_wake < LOCK_SCREEN_WAKE_INTERVAL:
+                return
+        try:
+            active = connection.call_sync(
+                GNOME_SCREENSAVER_NAME,
+                GNOME_SCREENSAVER_PATH,
+                GNOME_SCREENSAVER_INTERFACE,
+                "GetActive",
                 None,
+                GLib.VariantType.new("(b)"),
+                Gio.DBusCallFlags.NONE,
+                500,
                 None,
+            )
+            if not active.unpack()[0]:
+                return
+            with self._lock:
+                # Rate-limit attempts too: notification policy or a desktop
+                # without a notification daemon must not turn pointer traffic
+                # into repeated failing D-Bus calls.
+                self._last_lock_screen_wake = now
+            notification = connection.call_sync(
+                NOTIFICATIONS_NAME,
+                NOTIFICATIONS_PATH,
+                NOTIFICATIONS_INTERFACE,
+                "Notify",
+                GLib.Variant(
+                    "(susssasa{sv}i)",
+                    (
+                        "Mouse Without Borders",
+                        self._wake_notification_id,
+                        DESKTOP_ID,
+                        "Remote input received",
+                        "The screen remains locked.",
+                        [],
+                        {
+                            "desktop-entry": GLib.Variant("s", DESKTOP_ID),
+                            "transient": GLib.Variant("b", True),
+                        },
+                        1500,
+                    ),
+                ),
+                GLib.VariantType.new("(u)"),
                 Gio.DBusCallFlags.NONE,
                 750,
                 None,
             )
-            self._session_bus = connection
-        except GLib.Error as exc:
-            # Injected EIS movement still wakes compositors that do not expose
-            # the freedesktop screensaver interface.
-            LOGGER.debug("desktop activity signal unavailable: %s", exc)
-        finally:
             with self._lock:
-                self._activity_pending = False
+                self._wake_notification_id = notification.unpack()[0]
+        except (GLib.Error, TypeError, IndexError) as exc:
+            LOGGER.debug("GNOME lock-screen wake unavailable: %s", exc)
 
     def stop(self) -> None:
         self._connected = False
         self._release_sleep_inhibitor()
         self._system_bus = None
         self._session_bus = None
+        self._wake_notification_id = 0
