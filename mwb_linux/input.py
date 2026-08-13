@@ -176,6 +176,8 @@ class PortalBridge:
         enable_capture: bool = True,
         zone: list[int] | None = None,
         targets: list[dict[str, object]] | None = None,
+        backend: str = "portal",
+        screen: list[int] | None = None,
     ) -> None:
         executable = find_bridge()
         if not executable:
@@ -207,6 +209,8 @@ class PortalBridge:
             "inject_init",
             id="inject",
             restore_token=inject_restore_token or None,
+            backend=backend,
+            screen=list(screen) if screen else None,
         )
 
     def _read_loop(self) -> None:
@@ -393,6 +397,8 @@ class InputManager:
                 enable_capture=self.config.edge_switching,
                 zone=self.config.host_zone or None,
                 targets=capture_targets(self.config),
+                backend=self.inject_backend,
+                screen=self.desktop_geometry(),
             )
             self._started = True
             self._inject_ready = False
@@ -753,6 +759,11 @@ class InputManager:
                 self.inject_y = float(top)
                 self.inject_width = float(right - left)
                 self.inject_height = float(bottom - top)
+        elif event_type == "inject_backend_fallback":
+            self.status_callback(
+                "Direct kernel input unavailable, using the portal: "
+                f"{event.get('reason', 'unknown')}"
+            )
         elif event_type in ("inject_devices_paused", "inject_devices_resumed"):
             self._update_injection_availability(int(event.get("active", 0)))
         elif event_type == "inject_error":
@@ -787,9 +798,16 @@ class InputManager:
 
         self.session_locked = locked
         if locked:
-            # Nothing can be rebuilt now: the compositor refuses to hand a
-            # locked session any input device. Stop trying and say why.
+            # Screen-edge capture always dies with the portal session, so the
+            # local grab must be dropped either way.
             self.release_local()
+            if self.injection_survives_lock:
+                # Kernel input devices are not portal sessions; the compositor
+                # has nothing to revoke, so remote control continues.
+                self.status_callback(
+                    "This PC is locked; remote keyboard and mouse still work"
+                )
+                return
             self.injection_paused = True
             self.status_callback(
                 "This PC is locked; remote input resumes when you unlock it"
@@ -850,6 +868,8 @@ class InputManager:
                     "inject_init",
                     timeout=15.0,
                     restore_token=self.config.inject_restore_token or None,
+                    backend=self.inject_backend,
+                    screen=self.desktop_geometry(),
                 )
             except (ConnectionError, TimeoutError) as exc:
                 LOGGER.info("remote input session not restorable yet: %s", exc)
@@ -877,6 +897,31 @@ class InputManager:
                 LOGGER.info("screen-edge capture not restorable yet: %s", exc)
                 recovered = False
         return recovered
+
+    @property
+    def inject_backend(self) -> str:
+        """Return the injection path the user configured."""
+
+        if self.config.other_options.get("use_kernel_input"):
+            return "uinput"
+        return "portal"
+
+    def desktop_geometry(self) -> list[int]:
+        """Return the desktop rectangle the absolute pointer is ranged over."""
+
+        if self.inject_regions:
+            left = min(region[0] for region in self.inject_regions)
+            top = min(region[1] for region in self.inject_regions)
+            right = max(region[0] + region[2] for region in self.inject_regions)
+            bottom = max(region[1] + region[3] for region in self.inject_regions)
+            return [left, top, max(1, right - left), max(1, bottom - top)]
+        return [0, 0, max(1, int(self.width)), max(1, int(self.height))]
+
+    @property
+    def injection_survives_lock(self) -> bool:
+        """A kernel input device is not revoked when the session locks."""
+
+        return self.inject_backend == "uinput"
 
     def _note_capture_persistence(self, result: dict, stored_token: bool) -> None:
         """Explain a permission prompt that the portal is unable to remember.

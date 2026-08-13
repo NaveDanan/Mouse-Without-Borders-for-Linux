@@ -883,3 +883,89 @@ class CapturePersistenceTests(unittest.TestCase):
         self.capture_response(manager, portal_version=0, restore_token="tok-2", zones=[])
 
         self.assertTrue(manager.capture_persistable)
+
+
+class KernelInputBackendTests(unittest.TestCase):
+    """Kernel input is opt-in and must survive the lock screen."""
+
+    def manager(self, messages=None, **options):
+        return InputManager(
+            Config(edge_switching=True, other_options=options),
+            Mock(),
+            Mock(return_value=None),
+            (messages if messages is not None else []).append,
+            bridge=FakeBridge(),
+        )
+
+    def test_the_portal_remains_the_default(self):
+        manager = self.manager()
+        self.assertEqual(manager.inject_backend, "portal")
+        self.assertFalse(manager.injection_survives_lock)
+
+    def test_enabling_the_option_selects_uinput(self):
+        manager = self.manager(use_kernel_input=True)
+        self.assertEqual(manager.inject_backend, "uinput")
+        self.assertTrue(manager.injection_survives_lock)
+
+    def test_the_backend_and_desktop_size_reach_the_bridge(self):
+        bridge = FakeBridge()
+        manager = InputManager(
+            Config(edge_switching=True, other_options={"use_kernel_input": True}),
+            Mock(),
+            Mock(return_value=None),
+            [].append,
+            bridge=bridge,
+        )
+        manager._desired = True
+
+        manager.start()
+
+        start = next(c for c in bridge.commands if c[0] == "start")
+        self.assertEqual(start[2]["backend"], "uinput")
+        # The absolute pointer axes have to be ranged over the desktop.
+        self.assertEqual(start[2]["screen"], [0, 0, 1920, 1080])
+
+    def test_a_locked_screen_keeps_kernel_input_working(self):
+        messages = []
+        manager = self.manager(messages, use_kernel_input=True)
+        manager._desired = True
+        manager._started = True
+        manager._inject_ready = True
+
+        manager.session_lock_changed(True)
+
+        # No pause: the compositor cannot revoke a kernel input device.
+        self.assertFalse(manager.injection_paused)
+        self.assertIn("still work", messages[-1])
+
+    def test_a_locked_screen_still_pauses_the_portal_backend(self):
+        messages = []
+        manager = self.manager(messages)
+        manager._desired = True
+        manager._started = True
+        manager._inject_ready = True
+
+        manager.session_lock_changed(True)
+
+        self.assertTrue(manager.injection_paused)
+        self.assertIn("resumes when you unlock", messages[-1])
+
+    def test_desktop_geometry_follows_the_reported_regions(self):
+        manager = self.manager(use_kernel_input=True)
+        manager.inject_regions = [(0, 0, 1920, 1080), (1920, 0, 1280, 1024)]
+
+        self.assertEqual(manager.desktop_geometry(), [0, 0, 3200, 1080])
+
+    def test_a_uinput_fallback_is_explained_rather_than_silent(self):
+        messages = []
+        manager = self.manager(messages, use_kernel_input=True)
+
+        manager._bridge_event({
+            "type": "event",
+            "event": "inject_backend_fallback",
+            "requested": "uinput",
+            "using": "portal",
+            "reason": "no write access to /dev/uinput",
+        })
+
+        self.assertIn("/dev/uinput", messages[-1])

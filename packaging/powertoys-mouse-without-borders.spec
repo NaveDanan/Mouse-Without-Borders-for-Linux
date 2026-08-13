@@ -62,6 +62,9 @@ install -m 0644 resources/io.github.NaveDanan.MouseWithoutBorders.desktop \
     %{buildroot}%{_datadir}/applications/io.github.NaveDanan.MouseWithoutBorders.desktop
 install -m 0644 resources/io.github.NaveDanan.MouseWithoutBorders.metainfo.xml \
     %{buildroot}%{_datadir}/metainfo/io.github.NaveDanan.MouseWithoutBorders.metainfo.xml
+install -d %{buildroot}%{_udevrulesdir}
+install -m 0644 resources/60-powertoys-mouse-without-borders-uinput.rules \
+    %{buildroot}%{_udevrulesdir}/60-powertoys-mouse-without-borders-uinput.rules
 install -m 0644 mwb_linux/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg
 install -m 0644 README.md \
@@ -82,8 +85,12 @@ install -m 0644 THIRD-PARTY-NOTICES.md \
 %{_datadir}/applications/io.github.NaveDanan.MouseWithoutBorders.desktop
 %{_datadir}/metainfo/io.github.NaveDanan.MouseWithoutBorders.metainfo.xml
 %{_datadir}/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg
+%{_udevrulesdir}/60-powertoys-mouse-without-borders-uinput.rules
 
 %changelog
+* Fri Aug 14 2026 Nave Danan <nave0712@gmail.com> - 0.7.0-1
+- Add opt-in kernel input injection that works on the lock screen.
+
 * Thu Aug 13 2026 Nave Danan <nave0712@gmail.com> - 0.6.0-1
 - Keep the connection alive across lid close, suspend, resume and lock screen.
 

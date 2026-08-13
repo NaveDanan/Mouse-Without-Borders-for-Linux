@@ -28,6 +28,16 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.0" date="2026-08-14">
+      <description>
+        <p>
+          Add optional kernel-level input injection so a remote computer can
+          control, and log back into, a locked Linux screen that the desktop
+          portal cannot reach. Settings written by a newer release no longer
+          prevent an older one from starting.
+        </p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-08-13">
       <description>
         <p>

@@ -51,6 +51,9 @@ install -m 0644 "$LINUX_DIR/resources/io.github.NaveDanan.MouseWithoutBorders.de
     "$BUILD_ROOT/usr/share/applications/io.github.NaveDanan.MouseWithoutBorders.desktop"
 install -m 0644 "$LINUX_DIR/resources/io.github.NaveDanan.MouseWithoutBorders.metainfo.xml" \
     "$BUILD_ROOT/usr/share/metainfo/io.github.NaveDanan.MouseWithoutBorders.metainfo.xml"
+install -d "$BUILD_ROOT/usr/lib/udev/rules.d"
+install -m 0644 "$LINUX_DIR/resources/60-powertoys-mouse-without-borders-uinput.rules" \
+    "$BUILD_ROOT/usr/lib/udev/rules.d/60-powertoys-mouse-without-borders-uinput.rules"
 install -m 0644 "$LINUX_DIR/mwb_linux/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg" \
     "$BUILD_ROOT/usr/share/icons/hicolor/scalable/apps/io.github.NaveDanan.MouseWithoutBorders.svg"
 install -m 0644 "$LINUX_DIR/README.md" \

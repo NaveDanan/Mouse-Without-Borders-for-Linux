@@ -353,11 +353,12 @@ dependencies = [
 
 [[package]]
 name = "mwb-portal-bridge"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "ashpd",
  "futures-util",
+ "libc",
  "reis",
  "rustix 0.38.44",
  "serde",

@@ -137,6 +137,11 @@ LINUX_OPTIONS = (
         "Never lock this screen while a remote PC is connected (a locked "
         "session cannot accept remote input)",
     ),
+    (
+        "use_kernel_input",
+        "Use direct kernel input so remote control also works on the lock "
+        "screen (bypasses the desktop portal permission prompt)",
+    ),
 )
 
 SWITCH_MODES = (("fkeys", "F1, F2, F3, F4"), ("numbers", "1, 2, 3, 4"), ("disabled", "Disable"))

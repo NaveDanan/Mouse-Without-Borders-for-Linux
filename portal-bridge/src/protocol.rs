@@ -20,6 +20,21 @@ pub enum KeyState {
     Released,
 }
 
+/// Which mechanism delivers injected input to the desktop.
+///
+/// The portal is the sandbox-friendly default. `Uinput` creates kernel input
+/// devices instead, which the compositor cannot revoke and which therefore
+/// keep working while the session is locked.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectBackend {
+    #[default]
+    Portal,
+    Uinput,
+    /// Prefer uinput when the device is usable, else fall back to the portal.
+    Auto,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ButtonState {
@@ -87,6 +102,12 @@ pub enum Command {
         id: Option<Value>,
         #[serde(default)]
         restore_token: Option<String>,
+        /// Which injection path to use: "portal", "uinput" or "auto".
+        #[serde(default)]
+        backend: Option<InjectBackend>,
+        /// Desktop geometry for the uinput absolute pointer axes.
+        #[serde(default)]
+        screen: Option<[i32; 4]>,
     },
     InjectKey {
         #[serde(default)]

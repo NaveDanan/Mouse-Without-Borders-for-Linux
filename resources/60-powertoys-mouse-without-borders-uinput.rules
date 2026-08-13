@@ -1,0 +1,12 @@
+# Mouse Without Borders for Linux: kernel-level input injection.
+#
+# The RemoteDesktop portal cannot reach a locked session, because the
+# compositor destroys every injected input device when the screen locks. A
+# uinput device is treated as real hardware, so it keeps working there.
+#
+# This grants write access to the "input" group, which is the same group that
+# already owns /dev/input/event*. Anything a user in that group runs can then
+# synthesise keystrokes, including into the lock screen. The application only
+# uses it when "Use direct kernel input" is enabled in its settings; remove
+# this file to withdraw the capability entirely.
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

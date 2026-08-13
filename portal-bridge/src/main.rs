@@ -4,7 +4,10 @@
 use anyhow::{Result, anyhow, bail};
 use mwb_portal_bridge::capture::{CaptureHandle, CaptureTargetSpec, Zone, start_capture};
 use mwb_portal_bridge::inject::{InjectAction, InjectionHandle, start_injection};
-use mwb_portal_bridge::protocol::{CaptureTarget, Command, Edge, response_error, response_ok};
+use mwb_portal_bridge::protocol::{
+    CaptureTarget, Command, Edge, InjectBackend, event, response_error, response_ok,
+};
+use mwb_portal_bridge::uinput::{UinputInjector, availability_error};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -12,6 +15,9 @@ use tokio::sync::mpsc;
 struct Bridge {
     capture: Option<CaptureHandle>,
     injection: Option<InjectionHandle>,
+    /// Kernel-level injection, used instead of the portal when selected. It
+    /// survives the lock screen, which no portal session can.
+    uinput: Option<UinputInjector>,
     output: mpsc::Sender<Value>,
 }
 
@@ -20,6 +26,7 @@ impl Bridge {
         Self {
             capture: None,
             injection: None,
+            uinput: None,
             output,
         }
     }
@@ -89,9 +96,48 @@ impl Bridge {
                 capture.stop().await?;
                 Ok((json!({ "stopped": true }), false))
             }
-            Command::InjectInit { restore_token, .. } => {
+            Command::InjectInit {
+                restore_token,
+                backend,
+                screen,
+                ..
+            } => {
+                if self.uinput.is_some() {
+                    return Err(anyhow!("input injection is already initialized"));
+                }
                 if !self.discard_dead_injection() {
                     return Err(anyhow!("input injection is already initialized"));
+                }
+                let backend = backend.unwrap_or_default();
+                if matches!(backend, InjectBackend::Uinput | InjectBackend::Auto) {
+                    let screen = screen
+                        .ok_or_else(|| anyhow!("uinput injection needs the desktop geometry"))?;
+                    match UinputInjector::new(screen) {
+                        Ok(injector) => {
+                            let info = injector.describe();
+                            self.uinput = Some(injector);
+                            return Ok((info, false));
+                        }
+                        Err(error) if matches!(backend, InjectBackend::Uinput) => {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            // Auto: report why and continue with the portal so
+                            // a machine without uinput access still works.
+                            self.output
+                                .send(event(
+                                    "inject_backend_fallback",
+                                    json!({
+                                        "requested": "uinput",
+                                        "using": "portal",
+                                        "reason": availability_error()
+                                            .unwrap_or_else(|| format!("{error:#}")),
+                                    }),
+                                ))
+                                .await
+                                .ok();
+                        }
+                    }
                 }
                 let (handle, info) = start_injection(restore_token, self.output.clone()).await?;
                 self.injection = Some(handle);
@@ -121,6 +167,9 @@ impl Bridge {
                 Ok((json!({ "injected": true }), false))
             }
             Command::InjectStop { .. } => {
+                if self.uinput.take().is_some() {
+                    return Ok((json!({ "stopped": true }), false));
+                }
                 let injection = self
                     .injection
                     .take()
@@ -165,7 +214,16 @@ impl Bridge {
         }
     }
 
-    async fn inject(&self, action: InjectAction) -> Result<()> {
+    async fn inject(&mut self, action: InjectAction) -> Result<()> {
+        if let Some(uinput) = self.uinput.as_mut() {
+            return match action {
+                InjectAction::Key { keycode, state } => uinput.key(keycode, state),
+                InjectAction::PointerMotion { dx, dy } => uinput.motion(dx, dy),
+                InjectAction::PointerAbsolute { x, y } => uinput.absolute(x, y),
+                InjectAction::Button { button, state } => uinput.button(button, state),
+                InjectAction::Scroll { dx, dy, discrete } => uinput.scroll(dx, dy, discrete),
+            };
+        }
         self.injection
             .as_ref()
             .ok_or_else(|| anyhow!("input injection is not initialized"))?
@@ -175,6 +233,7 @@ impl Bridge {
 
     async fn stop_all(&mut self) -> Result<()> {
         let mut errors = Vec::new();
+        self.uinput = None;
         if let Some(capture) = self.capture.take()
             && let Err(error) = capture.stop().await
         {

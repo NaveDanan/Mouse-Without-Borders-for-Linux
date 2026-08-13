@@ -4,3 +4,4 @@
 pub mod capture;
 pub mod inject;
 pub mod protocol;
+pub mod uinput;

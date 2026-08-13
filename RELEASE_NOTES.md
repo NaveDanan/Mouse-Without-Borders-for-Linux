@@ -1,97 +1,73 @@
-# Stay connected through lid close, suspend and the lock screen
+# Control the lock screen from the remote computer
 
-Mouse Without Borders for Linux kept dropping its Windows peers whenever the
-machine slept, and it often refused to come back afterwards. This release fixes
-the disconnects at their source and makes recovery automatic.
+The desktop portal cannot reach a locked Linux session. When the screen locks,
+the compositor destroys every injected input device, so remote keyboard and
+mouse stop at the lock screen and there is no way to log back in from the
+other computer. This release adds an optional path that does not have that
+limitation, and fixes a settings bug that could stop an older install from
+starting.
 
-## Why the connection kept dropping
+## Direct kernel input
 
-Two independent faults were responsible, and both are fixed.
+**Use direct kernel input**, under *Other Options -> Linux Power*, injects
+through `/dev/uinput` instead of the RemoteDesktop portal. A uinput device is
+indistinguishable from physical hardware at the evdev layer, so the lock screen
+accepts it exactly like a real keyboard: remote control keeps working while the
+screen is locked, and typing the password from the remote computer logs the
+machine back in.
 
-**systemd ignored the sleep inhibitor when the lid closed.**
-`logind.conf` documents that `LidSwitchIgnoreInhibited=` defaults to `yes`, so
-the high-level `sleep` lock the app was holding is *silently discarded* on a lid
-event. Only the low-level `handle-lid-switch` lock is honoured unconditionally,
-and the app never took it. Closing the lid suspended the machine, NetworkManager
-tore down Wi-Fi, and the peer connection died.
+Measured on GNOME 46 / Wayland, driving the real bridge with the backend
+enabled: after locking the session, keystrokes sent as ordinary `inject_key`
+commands reached the lock screen and were evaluated by PAM, which logged the
+expected failure for a deliberately wrong password. Absolute pointer
+positioning was verified separately against a fullscreen window and landed on
+the exact requested pixel for every sample.
 
-**A slow handshake was reported as a wrong security key.** A handshake timeout
-was raised as an authentication error, which added the peer to the permanently
-rejected list, surfaced *"verify its active security key"*, and stopped all
-further reconnect attempts. A peer that was merely still waking up was locked
-out until the user intervened. Timeouts are now a distinct, retryable condition.
+Three virtual devices are created rather than one, because libinput classifies
+a device by the axes it advertises and mixing relative with absolute pointer
+axes on a single node is ambiguous.
 
-## What changed
+### Why it is off by default
 
-- **Suspend is now a clean hand-off.** The app holds a logind `delay` lock and
-  reacts to `PrepareForSleep`: it releases the compositor grab and closes the
-  control channels while the network is still up, so the Windows peer sees an
-  immediate disconnect instead of a half-open socket. On resume it rebuilds
-  from the signal rather than waiting for a clock-drift poll.
-- **Reconnect understands a down link.** Attempts made before Wi-Fi has
-  reassociated no longer burn the exponential backoff or report an error; they
-  retry at a steady pace and report *"Waiting for the network"*.
-- **Remote input recovers by itself after unlock.** The compositor destroys
-  every injected input device when the screen locks. The app now rebuilds only
-  the dead injection session, using its restore token, instead of discarding
-  the whole portal helper and forcing a fresh consent dialog. Recovery waits
-  for the unlock rather than retrying into a locked session.
-- **Optional: keep the lid from suspending.** *Stay connected when the laptop
-  lid closes* takes the low-level lid lock and locks the session in software
-  instead, so the desktop is still secured while the peer stays connected. Off
-  by default, because it also stops a closed laptop from sleeping in a bag.
-- **Optional: never lock while connected.** A locked GNOME session cannot
-  accept remote input at all, so this holds a GNOME idle inhibitor to keep the
-  screen from auto-locking while a peer is sharing the desktop. Off by default.
-- **Diagnosability.** Portal and compositor transitions are logged, EIS device
-  pause and resume are reported instead of being swallowed, and repeated
-  identical status lines no longer flood the log.
+Kernel input steps outside the portal's per-session consent model. Once
+enabled there is no permission prompt, and the packaged udev rule lets any
+process running as a user in the `input` group synthesise input, including into
+the lock screen. That group already owns `/dev/input/event*`, so on most
+systems this grants no new access to physical input devices, but it is a real
+widening and is worth understanding before turning it on. Removing
+`/usr/lib/udev/rules.d/60-powertoys-mouse-without-borders-uinput.rules`
+withdraws the capability.
 
-## Known limitation: the lock screen and the InputCapture prompt
+The portal remains the default and nothing changes for existing installs.
+Where `/dev/uinput` cannot be opened the application reports the reason and
+continues on the portal rather than failing. Screen-edge capture always uses
+the portal, so enabling kernel input does not remove the capture prompt.
 
-**Remote input cannot control the GNOME lock screen, and this is not fixable
-from the application.** Testing on GNOME 46 / Wayland confirmed it twice:
+## Settings from a newer release no longer break an older one
 
-- through the portal, locking removes every EIS device and drops the connection
-  (`inject_error: EIS disconnected`);
-- through mutter's own private `org.gnome.Mutter.RemoteDesktop` API, the session
-  object itself is deleted (`Object does not exist at path ...`).
-
-No portal-based session can inject input into the lock screen. Use *never lock
-while connected* to avoid reaching the lock screen, or unlock the machine
-locally; the connection and remote input then restore themselves automatically.
-
-A second, related limitation affects screen-edge capture. Session persistence
-for InputCapture requires version 2 of that interface, which the portal
-frontend has supported since xdg-desktop-portal 1.21.1. The frontend advertises
-`MIN(impl_version, 2)`, so the desktop's portal *backend* has to implement it
-too, and no released `xdg-desktop-portal-gnome` does: 46, 47, 48, 49 and 50 all
-lack `CreateSession2`, `restore_token` and `persist_mode` in their InputCapture
-implementation. Until a backend ships it, rebuilding a capture session always
-prompts. Remote input injection is unaffected because RemoteDesktop is already
-at version 2 and keeps its restore token. Mouse Without Borders already
-requests the version 2 flow and falls back cleanly, so persistence starts
-working by itself once a desktop provides it; the log now explains the prompt
-instead of leaving it unexplained.
+`Config.validate()` rejected any unrecognised entry in `other_options` or
+`hotkeys` outright. Because a newer release writes its own keys into the shared
+settings file, downgrading, or simply running an older install afterwards, made
+it fail to start with `unknown options: ...`. Unrecognised entries are now kept
+and reported instead of being fatal, matching how unknown top-level fields were
+already tolerated, and they survive a save so upgrading again restores the
+choice. Hotkey values are only range-checked for hotkeys this version knows, so
+a future release may widen them safely.
 
 ## Verification
 
-- 230 Python tests and 27 Rust tests pass; Clippy is clean and AppStream
+- 246 Python tests and 34 Rust tests pass; Clippy is clean and AppStream
   metadata validates.
-- Two unattended suspend/resume cycles on real hardware, using an RTC wake
-  alarm: the pre-suspend close, the resume signal and the reconnection of both
-  peers were confirmed from the service log, with no unreachable-network noise.
-- The lid fault was confirmed against live logind state: `BlockInhibited` now
-  contains `handle-lid-switch`, which it previously did not.
-- The lock-screen limitation was measured directly with both APIs described
-  above.
-- New tests cover the lid inhibitor, the suspend and resume signals, lock-aware
-  input recovery, retryable handshake timeouts and network-aware backoff. The
-  logind signal tests run against a real private D-Bus in an isolated
-  interpreter.
+- The lock-screen path was exercised through the production bridge, not a
+  prototype, and confirmed from PAM's own log.
+- A Rust test asserts the kernel registers all three virtual devices, and skips
+  where `/dev/uinput` is not writable, such as on a build machine.
+- Unit tests cover the `uinput_user_dev` payload layout, absolute-axis ranging,
+  device-name truncation, backend selection, portal fallback reporting and the
+  lock-screen behaviour of each backend.
 
-No user-visible visual change other than two new checkboxes under
-*Other Options -> Linux Power*.
+No visual change other than one new checkbox under *Other Options -> Linux
+Power*.
 
 ## Packages
 

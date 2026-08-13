@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -13,6 +14,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 SECRET_LENGTH = 16
+LOGGER = logging.getLogger(__name__)
+
 MAX_MACHINES = 4
 MAC_ADDRESS_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 
@@ -51,6 +54,11 @@ OTHER_OPTION_DEFAULTS: dict[str, bool] = {
     # because the compositor destroys every injected device, so the only way
     # to stay controllable is to never reach the lock screen.
     "never_lock_while_connected": False,
+    # Linux-only, opt-in. Injects through /dev/uinput instead of the
+    # RemoteDesktop portal. The compositor cannot revoke a kernel input
+    # device, so remote control keeps working on the lock screen, at the cost
+    # of leaving the portal's per-session consent model behind.
+    "use_kernel_input": False,
 }
 
 #: Single-letter accelerators shown on the Other Options tab. ``Disable``
@@ -266,13 +274,27 @@ class Config:
             raise ValueError("unsupported crypto profile")
         if self.switch_hotkey not in SWITCH_HOTKEY_MODES:
             raise ValueError("switch hotkey must be fkeys, numbers, or disabled")
+        # Unknown keys are reported and kept rather than rejected. A settings
+        # file written by a newer release must never stop an older one from
+        # starting, and discarding the keys would lose the user's choice as
+        # soon as they upgraded again. Unknown top-level fields are already
+        # tolerated the same way in load().
         unknown_options = set(self.other_options) - set(OTHER_OPTION_DEFAULTS)
         if unknown_options:
-            raise ValueError(f"unknown options: {', '.join(sorted(unknown_options))}")
+            LOGGER.warning(
+                "keeping options this version does not implement: %s",
+                ", ".join(sorted(unknown_options)),
+            )
         unknown_hotkeys = set(self.hotkeys) - set(HOTKEY_DEFAULTS)
         if unknown_hotkeys:
-            raise ValueError(f"unknown hotkeys: {', '.join(sorted(unknown_hotkeys))}")
+            LOGGER.warning(
+                "keeping hotkeys this version does not implement: %s",
+                ", ".join(sorted(unknown_hotkeys)),
+            )
         for name, value in self.hotkeys.items():
+            if name in unknown_hotkeys:
+                # A future release may widen what a hotkey value may hold.
+                continue
             if value != HOTKEY_DISABLED and value not in string.ascii_uppercase:
                 raise ValueError(f"hotkey {name} must be a single A-Z letter or Disable")
         parse_ip_mappings(self.ip_mappings)

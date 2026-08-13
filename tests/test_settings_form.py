@@ -162,9 +162,46 @@ class SettingsFormConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(hotkeys={"exit": "Ctrl"}).validate()
         with self.assertRaises(ValueError):
-            Config(other_options={"fly_mouse": True}).validate()
-        with self.assertRaises(ValueError):
             Config(host_zone=[0, 0]).validate()
+
+    def test_settings_written_by_a_newer_release_still_start(self):
+        """A newer version's option keys must not disable an older one."""
+
+        config = Config(
+            other_options={"warp_factor": True},
+            hotkeys={"engage": "Q"},
+        )
+
+        with self.assertLogs("mwb_linux.config", level="WARNING") as logs:
+            config.validate()
+
+        report = "\n".join(logs.output)
+        self.assertIn("warp_factor", report)
+        self.assertIn("engage", report)
+
+    def test_unknown_settings_survive_a_save_and_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            Config(
+                secret="0123456789abcdef",
+                other_options={"warp_factor": True},
+            ).save(path)
+
+            reloaded = Config.load(path)
+
+        # Dropping them would silently lose the choice on the next upgrade.
+        self.assertTrue(reloaded.other_options["warp_factor"])
+        self.assertEqual(
+            reloaded.other_options["disable_cad"], OTHER_OPTION_DEFAULTS["disable_cad"]
+        )
+
+    def test_a_future_hotkey_value_does_not_fail_validation(self):
+        config = Config(hotkeys={"time_travel": "Ctrl+Alt+Whenever"})
+
+        with self.assertLogs("mwb_linux.config", level="WARNING"):
+            config.validate()
+
+        self.assertEqual(config.hotkeys["time_travel"], "Ctrl+Alt+Whenever")
 
     def test_four_computer_matrix_uses_windows_slot_coordinates(self):
         self.assertEqual(
@@ -433,8 +470,8 @@ class BackgroundServiceTests(unittest.TestCase):
 class UpdateUiTests(unittest.TestCase):
     def setUp(self):
         self.release = UpdateRelease(
-            version="0.6.0",
-            tag="v0.6.0",
+            version="0.7.0",
+            tag="v0.7.0",
             page_url="https://example.invalid/release",
             asset_name="update.deb",
             asset_url="https://example.invalid/update.deb",
@@ -493,7 +530,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, None, True, True)
 
-        form.update_status.set_text.assert_called_once_with("Up to date (0.6.0)")
+        form.update_status.set_text.assert_called_once_with("Up to date (0.7.0)")
 
     def test_new_version_is_announced_once(self):
         form = SimpleNamespace(
@@ -507,7 +544,7 @@ class UpdateUiTests(unittest.TestCase):
 
         MainWindow._finish_update_check(form, self.release, False, True)
 
-        form.update_status.set_text.assert_called_once_with("Version 0.6.0 available")
+        form.update_status.set_text.assert_called_once_with("Version 0.7.0 available")
         form._show_update_available.assert_called_once_with(self.release)
 
     def test_update_dialog_shows_current_and_latest_versions(self):
@@ -518,8 +555,8 @@ class UpdateUiTests(unittest.TestCase):
 
         form.present.assert_called_once_with()
         detail = dialog.set_detail.call_args.args[0]
-        self.assertIn("Current version: 0.6.0", detail)
-        self.assertIn("Latest version: 0.6.0", detail)
+        self.assertIn("Current version: 0.7.0", detail)
+        self.assertIn("Latest version: 0.7.0", detail)
         dialog.set_buttons.assert_called_once_with(["Later", "Download and Install"])
 
     def test_failed_install_keeps_the_application_open(self):

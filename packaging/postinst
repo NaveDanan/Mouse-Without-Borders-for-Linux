@@ -58,4 +58,11 @@ loginctl list-users --no-legend 2>/dev/null | while read -r uid user _rest; do
     fi
 done
 
+# Apply the uinput rule to the already-present device node so enabling direct
+# kernel input does not require a reboot. Harmless where udev is unavailable.
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=misc --name-match=uinput >/dev/null 2>&1 || true
+fi
+
 exit 0
