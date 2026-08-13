@@ -1,3 +1,7 @@
+# systemd-rpm-macros is not present on every builder (Ubuntu's rpm has no
+# such package), so define the udev rules directory when it is missing.
+%{!?_udevrulesdir: %global _udevrulesdir %{_prefix}/lib/udev/rules.d}
+
 Name:           powertoys-mouse-without-borders
 Version:        @VERSION@
 Release:        1%{?dist}
